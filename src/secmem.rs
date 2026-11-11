@@ -166,6 +166,77 @@ impl core::fmt::Debug for SecureArena {
     }
 }
 
+/// Argon2 working memory (spec Section 5.4, `KdfRegion`): a dedicated
+/// guarded, `MADV_DONTDUMP` mapping viewed as Argon2 blocks. Locking is
+/// attempted, never required here; the caller decides (`--require-locked-kdf`).
+/// Dropping it zeroizes the data, then `munlock`s, then `munmap`s.
+pub struct KdfRegion {
+    region: GuardedRegion,
+}
+
+// `blocks` views page-aligned memory as `argon2::Block`s (argon2 0.6.0:
+// `#[repr(align(64))] struct Block([u64; 128])`).
+const _: () = assert!(
+    core::mem::size_of::<argon2::Block>() == argon2::Block::SIZE
+        && core::mem::align_of::<argon2::Block>() <= 4096
+);
+
+impl KdfRegion {
+    /// Maps a region of at least `blocks` Argon2 blocks (1 KiB each) and
+    /// attempts to lock it.
+    ///
+    /// # Errors
+    /// [`Error::Size`] if the size overflows; [`Error::Map`] if mapping fails.
+    pub fn new(blocks: usize) -> Result<Self, Error> {
+        let len = blocks.checked_mul(argon2::Block::SIZE).ok_or(Error::Size)?;
+        let mut region = GuardedRegion::new(len).map_err(Error::Map)?;
+        let _ = region.lock();
+        Ok(KdfRegion { region })
+    }
+
+    /// Whether the region is locked in RAM.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.region.is_locked()
+    }
+
+    /// Address range `[start, end)` of the data part (not secret; T-MEM-7).
+    #[must_use]
+    pub fn data_range(&self) -> (usize, usize) {
+        self.region.data_range()
+    }
+
+    /// The region as Argon2 blocks (whole pages, so at least the requested
+    /// count).
+    #[must_use]
+    pub fn blocks(&mut self) -> &mut [argon2::Block] {
+        let data = self.region.data_mut();
+        if data
+            .as_ptr()
+            .align_offset(core::mem::align_of::<argon2::Block>())
+            != 0
+        {
+            return &mut []; // unreachable for page-aligned maps; Argon2 then fails
+        }
+        let n = data.len() / argon2::Block::SIZE;
+        // SAFETY: `data` is aligned for `Block` (checked just above; it is
+        // page-aligned), initialised, and exclusively borrowed for the returned
+        // lifetime; `n * 1024 <= data.len()`. `Block` is plain `[u64; 128]`,
+        // so every bit pattern is a valid value.
+        #[allow(clippy::cast_ptr_alignment, reason = "alignment checked above")]
+        unsafe {
+            core::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<argon2::Block>(), n)
+        }
+    }
+
+    /// `memtest` (T-MEM-7): runs the drop sequence, calling `hook` with the
+    /// data after zeroization and just before `munmap`.
+    #[cfg(feature = "memtest")]
+    pub fn close_with_snapshot(self, hook: &mut dyn FnMut(&[u8])) {
+        self.region.close_with_snapshot(hook);
+    }
+}
+
 /// The fixed slots of the arena (spec Section 5.2 table).
 #[derive(Debug)]
 pub struct Slots<'a> {

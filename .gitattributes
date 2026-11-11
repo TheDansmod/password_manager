@@ -1,0 +1,4 @@
+# Golden vectors and fuzz seeds are byte-exact: never convert line endings.
+*.pwv binary
+tests/vectors/MANIFEST -text
+fuzz/corpus/** binary

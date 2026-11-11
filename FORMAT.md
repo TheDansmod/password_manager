@@ -1,12 +1,12 @@
 # pwv vault file format, version 1
 
-**Status: draft (M2).** This is spec Section 7, restated normatively, plus
-annotated hexdumps. The hexdumps below are of the synthetic fuzz seeds
-`fuzz/corpus/fuzz_header/seed-file` and `fuzz/corpus/fuzz_body/seed-sample`
-(the payload "ciphertext" in the former is filler). The annotated hexdump of
-a real golden vector (T-COMPAT-1) replaces them in M3. Implementation:
-`src/format.rs`. Where this file and the spec disagree, the spec wins and
-this file is a bug.
+**Status: draft (M3).** This is spec Section 7, restated normatively, plus
+the cryptographic binding of Section 6.2 (section 5 below) and annotated
+hexdumps: the header of the golden vault `tests/vectors/v1-small.pwv`
+(T-COMPAT-1) and the body of the fuzz seed
+`fuzz/corpus/fuzz_body/seed-sample`. Implementation: `src/format.rs`
+(layout), `src/crypto.rs` (primitives), `src/vault.rs` (lifecycle).
+Where this file and the spec disagree, the spec wins and this file is a bug.
 
 ## Conventions
 
@@ -50,27 +50,38 @@ it never reads more than 200 + 16 MiB.
 | 184 | L | `payload_ct` | AAD = bytes [0, 184) |
 | 184 + L | 16 | `payload_tag` | — |
 
-Writers never write m < 65,536 or t < 3 (spec Section 6.4).
+Writers never write m < 65,536 or t < 3 (spec Section 6.4). Test builds
+with the `testkdf` feature lower both floors of m to 8 KiB; such files are
+rejected by production builds.
 
-### Annotated header (`seed-file`, placeholder values)
+### Annotated header (`tests/vectors/v1-small.pwv`, golden vault)
+
+Built with `testkdf` (m = 64 KiB, below the production read floor);
+password and contents are in `tests/vectors/MANIFEST`.
 
 ```
 0000  50 57 56 41 55 4c 54 00                          magic "PWVAULT\0"
 0008  01 00                                            format_version = 1
 000a  00 00                                            flags = 0
-000c  11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11  vault_id
+000c  30 9f 3b d8 61 0f 6e 77 bb f4 e7 79 53 a9 3a 17  vault_id
 001c  01                                               kdf_id = 1 (Argon2id)
 001d  00 00 00                                         reserved
-0020  00 00 04 00                                      kdf_m_kib = 262,144 (256 MiB)
+0020  40 00 00 00                                      kdf_m_kib = 64 (testkdf)
 0024  03 00 00 00                                      kdf_t = 3
 0028  01 00 00 00                                      kdf_p = 1
-002c  22 × 32                                          salt
-004c  33 × 24                                          wrap_nonce   <- AAD_w ends here
-0064  44 × 48                                          wrapped_dek
-0094  07 00 00 00 00 00 00 00                          generation = 7
-009c  55 × 24                                          payload_nonce
-00b4  00 10 00 00                                      payload_len = 4096
-00b8  ...                                              payload_ct (4096 B), then tag (16 B)
+002c  2a 77 d0 41 a9 84 39 ab 17 b5 2b 3f ad 04 d7 42  salt
+003c  30 6c 00 f4 ca 30 da 9f 73 0e bd 46 28 ac ec 77
+004c  13 a0 1d 52 12 22 44 be e8 14 40 53 58 b9 e5 f7  wrap_nonce   (AAD_w = bytes 0x00..0x4b)
+005c  09 6b ee 32 34 8b 89 b6
+0064  c6 2e 50 88 5f a7 b1 c3 ef ab 1d 28 43 9a 5b 43  wrapped_dek  (DEK ciphertext 32 B, tag 16 B)
+0074  10 a1 a7 04 f3 7f 68 ed 8a ed 5e 70 20 b0 51 64
+0084  c5 9a 77 ba ad 0e 97 63 a8 9a e4 a9 4c 6b 3a 07
+0094  01 00 00 00 00 00 00 00                          generation = 1
+009c  ae a0 2a fb 0a e4 91 0d e6 c1 cc c6 a7 30 de 64  payload_nonce
+00ac  1e 03 9d 04 19 dd 4c 20
+00b4  00 10 00 00                                      payload_len = 4096 (AAD_p = bytes 0x00..0xb7)
+00b8  ...                                              payload_ct (4096 B)
+10b8  9d 9c f2 0e 88 1b 9f ff 26 c3 8e b0 3c 71 73 ff  payload_tag
 ```
 
 ## 3. Body (plaintext of the payload, L bytes)
@@ -152,3 +163,21 @@ Any change to these tables increments `format_version`. A version-N binary
 reads every version ≤ N through frozen per-version parsers and always
 writes version N. Each version has committed golden vectors (T-COMPAT-1)
 that must decrypt forever.
+
+## 5. Cryptographic binding (spec Section 6.2)
+
+```
+P'  = UTF8(NFC(P))                         # Unicode NFC only; P must be UTF-8
+KEK = Argon2id v0x13(P', salt; m = kdf_m_kib, t = kdf_t, p = 1, 32 bytes)
+W   = XChaCha20Poly1305.Seal(KEK, wrap_nonce,    DEK,       AAD = hdr[0, 76))
+C   = XChaCha20Poly1305.Seal(DEK, payload_nonce, body (L B), AAD = hdr[0, 184))
+```
+
+`wrapped_dek` is W (32-byte ciphertext then 16-byte tag); the file is
+`hdr ‖ C ‖ tag`. Both tag failures produce the same error ("wrong password
+or damaged vault"). A save draws a fresh `payload_nonce` and increments
+`generation`, leaving `wrap_nonce` and `wrapped_dek` unchanged; `passwd`
+draws a fresh salt, DEK, and both nonces, and keeps `vault_id`.
+`scripts/verify_golden.py` is an independent implementation of this
+section (argon2-cffi and libsodium) and decrypts every golden vault.
+

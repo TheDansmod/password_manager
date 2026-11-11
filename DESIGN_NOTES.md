@@ -12,7 +12,7 @@ Toolchain: Rust 1.99.1 stable (`rust-toolchain.toml`), edition 2024,
 | Crate | Version | Features | API verified (rule 4) |
 | --- | --- | --- | --- |
 | `argon2` | 0.6.0 | `zeroize` only (defaults off: no `password-hash`, no `getrandom`) | `Argon2::hash_password_into_with_memory` present (src/lib.rs:307) |
-| `chacha20poly1305` | 0.11.0 | `zeroize` only (defaults off: no `alloc`, no `getrandom`) | `AeadInOut::encrypt_in_place_detached` / `decrypt_in_place_detached` present in `aead` 0.6.1 |
+| `chacha20poly1305` | 0.11.0 | `zeroize` only (defaults off: no `alloc`, no `getrandom`) In `aead` 0.6.1 `encrypt_in_place_detached` / `decrypt_in_place_detached` are on the deprecated `AeadInPlace` trait, which forwards to `AeadInOut::{en,de}crypt_inout_detached`; M3 calls those in place (see 2026-11-11, M3) |
 | `zeroize` | 1.9.1 | default | — |
 | `getrandom` | 0.4.3 | default | — |
 | `rustix` | 1.1.6 | `event fs mm param process stdio termios` | `mm::Advice::LinuxDontDump`, `LinuxWipeOnFork`; `process::set_dumpable_behavior`, `setrlimit`, `umask`; `fs::flock`, `fstatfs` present. `mlock` re-checked in M1 |
@@ -22,7 +22,8 @@ Toolchain: Rust 1.99.1 stable (`rust-toolchain.toml`), edition 2024,
 | `zxcvbn` (feature `strength`) | 3.1.1 | defaults off (no `derive_builder`) | — |
 
 Dev-only (unconstrained by the budget): `expectrl` 0.9.0, `proptest` 1.12.0,
-`rand_chacha` 0.10.0, `static_assertions` 1.1.0, `tempfile` 3.27.0.
+`rand_chacha` 0.10.0, `static_assertions` 1.1.0, `tempfile` 3.27.0, `sha2`
+0.11.1 (M3: golden-vault checksums).
 `libfuzzer-sys` lives in the separate `fuzz/` crate (M2).
 
 Default features were disabled wherever they pull in code the spec does not
@@ -370,12 +371,13 @@ one (static.rust-lang.org is blocked, and the rustup home is read-only).
   corpus-file check (file I/O under Miri isolation). Also reduced under Miri
   (2026-11-11, after the first CI Miri run stalled for 25 min inside
   `t_fmt_2_body_length`): that test's 16 MiB + 4 KiB length case becomes
-  3 × 4096 − 1 (the length check is O(1); the zeroizing allocator wipes and
-  verifies a 16 MiB buffer byte by byte, which Miri interprets), and
-  `t_fmt_2_entry_count_*` skips building 10,000 real records (max + 1 is
-  still rejected, with no records). The native run keeps every case. The
-  `testkdf` Miri run is limited to the `header` and `file` tests, the only
-  ones that read `KDF_M_MIN`. The native run is
+  3 × 4096 − 1 under Miri (the length check is O(1); the zeroizing
+  allocator wipes and verifies a 16 MiB buffer byte by byte, which Miri
+  interprets). Measured on CI, Miri handles about 20 KB of buffers in
+  `t_fmt_2_value_len_*` in 144 s, so the 16 MiB case would need days. The
+  10,000-entry case and the full `testkdf` suite were reduced at first and
+  are **restored** (M3, owner: long runs are fine if they progress); the
+  10,000-entry test runs as its own Miri job. The native run is
   unchanged. Miri itself could not run in the sandbox (no nightly); see the
   entry "Miri not run".
 - A hand mutation check (12 mutants: each body and header constraint
@@ -439,4 +441,117 @@ the per-constraint error enum that T-FMT-2 and Section 12.2 require, leaving
   run a positive control (a dumpable process killed by SIGSEGV *is*
   recorded, so the check is not vacuous), run T-MEM-5 against the release
   binary, then fail if `coredumpctl list pwv` finds an entry.
+
+## 2026-11-11 — M3: cryptography
+
+- **Where the lifecycle lives.** `format` and `crypto` share a layer, and
+  same-layer modules may not use each other (2026-11-10 entry). `crypto`
+  therefore holds only byte-level primitives: `normalize`, `derive_kek` /
+  `argon2_in_region`, `wrap_dek` / `unwrap_dek`, in-place `seal` / `open`,
+  `fill_random`, `ct_eq`. The file-level key lifecycle of Section 6.3
+  (`init`, `unlock`, `open_with_kek`, `save`, `passwd`, `adopt_dek`) needs
+  header bytes as associated data, so it is in `vault` (layer 3, pure),
+  which the unlock and save data flows of Section 4 already route through.
+- **AEAD API (rule 4 and rule 10).** Section 3 names
+  `encrypt_in_place_detached` / `decrypt_in_place_detached`. In
+  `aead` 0.6.1 these are on the deprecated `AeadInPlace` trait, whose
+  blanket impl forwards to `AeadInOut::{en,de}crypt_inout_detached(nonce,
+  aad, buf.into())`. `crypto` calls those forwarded-to methods with an
+  `InOutBuf` made from a single `&mut [u8]`: the same in-place operation,
+  without deprecated calls (CI denies warnings). No out-of-place or
+  allocating API is used. On a failed tag the buffer is zeroized.
+- **Password normalisation.** Section 6.2's formula is normative:
+  P′ = UTF8(NFC(P)). The OpaqueString profile's extra mapping of non-ASCII
+  spaces to U+0020 is not applied, since it is not in the formula.
+  Non-UTF-8 input is rejected (`crypto::Error::Password`, also when the
+  NFC form exceeds the 1 KiB slot: NFC can expand, e.g. U+0958 is 3 bytes
+  and normalises to 6). Empty passwords and the strength policy are the
+  CLI's job (M7). `normalize` writes NFC output char by char straight into
+  the slot; `unicode-normalization`'s internal buffer is covered by the
+  zeroizing allocator.
+- **KDF memory (Section 5.4).** `secmem::KdfRegion` is a `GuardedRegion`
+  (guards, `MADV_DONTDUMP`, `MADV_WIPEONFORK`) viewed as `argon2::Block`s
+  through one `unsafe` slice cast (alignment checked at run time,
+  size/alignment at compile time). `mlock` is attempted; the result is
+  `KdfOutcome::locked`, so the CLI can print the step 3 notice once per
+  unlock, and `require_locked` (`--require-locked-kdf`) turns failure into
+  `KdfUnlocked` (exit 4). The region is zeroized, `munlock`ed, and unmapped
+  before `argon2_in_region` returns, then `sys::scrub_stack()` runs: Argon2
+  keeps a 1 KiB block hash and address blocks on its own stack, which it
+  does not wipe (Section 18 residual risk). `KdfOutcome` carries the
+  region's address range for T-MEM-7 and, in `memtest`, whether every byte
+  was zero just before `munmap`.
+- **`testkdf` lowers the write floor too.** Section 6.4 says `testkdf`
+  "lowers the read floor to 8 KiB". Golden vaults are "built with
+  `testkdf`" (T-COMPAT-1), which requires writing at low cost, so under
+  `testkdf` `KDF_M_WRITE_MIN` = 8 KiB as well. The t ≥ 3 write floor is
+  unchanged. Production builds keep both floors at 64 MiB and refuse the
+  golden vaults on read (asserted by `t_compat_1_golden_vaults`).
+- **Save.** `vault::save` validates the body with `parse_body` (a
+  non-canonical body is never encrypted), increments the generation
+  (checked), draws a fresh payload nonce, validates the new header,
+  encrypts the body in place in its arena slot, copies header, ciphertext,
+  and tag into the file `Vec`, then decrypts the slot back in place. The
+  decryption verifies the file just produced, and the slot stays plaintext
+  so the scratch half can become the live half (Section 4, save step 3).
+  `h` changes only on success.
+- **Generations.** `init` returns a header with generation 0 that is never
+  written: the first `save` writes generation 1, as Section 6.3 requires.
+  `passwd` keeps the vault ID and generation and draws a fresh salt, DEK
+  (into `NewDek`), and wrap nonce; the re-encrypting `save` draws the fresh
+  payload nonce and increments the generation. The caller adopts the new
+  DEK (`adopt_dek`) only after the new file is safely written (M4).
+- **Unlock.** Parses the header, normalises `Pw1` into `Pw2`, wipes `Pw1`,
+  derives the KEK, wipes `Pw2`, unwraps the DEK into `Dek` (in place),
+  wipes the KEK, copies the ciphertext into the vault slot, decrypts in
+  place, and validates the body (data-flow step 7). Any failure leaves
+  `Dek` and the vault slot empty; the password slots and `Kek` are always
+  empty on return. A payload larger than the vault slot is
+  `vault::Error::Capacity` (exit 1, "raise --arena-size"), reported only
+  after the DEK unwrap succeeded.
+- **Exit codes.** `cli::exit_code` maps lifecycle errors: authentication
+  2, format/generation 3, KDF memory 4, password/parameters/capacity 1,
+  RNG/length 5. The spec gives no exit code for capacity; 1 (user error) is
+  used because `--arena-size` fixes it.
+- **Constant-time comparison.** `crypto::ct_eq` is the "small hand-written
+  constant-time loop" of Section 5.2; adding `subtle` is not needed.
+- **Tests.** `tests/crypto.rs`: T-KAT-1 (through `argon2_in_region` with
+  p = 4, secret, and associated data), T-KAT-2 (in place), T-CRY-1 (every
+  bit of `v1-small.pwv`, 34,368 cases with the KEK cached, plus 100 random
+  full-path cases; random flips that would raise `kdf_m_kib` above 64 MiB
+  are redrawn, because the full path would derive with up to 4 GiB per
+  case, and the cached-KEK sweep covers them), T-CRY-2 (also checks
+  `cli::exit_code` = 2), T-CRY-3 (10⁵ saves), T-CRY-4 (including splicing
+  the old wrap into the new file), T-CRY-5 (each header byte × 3 masks,
+  checked at the exact layer: unwrap for bytes 0..148, open for 148..184),
+  T-CRY-6 (both directions), T-COMPAT-1. Without `testkdf`, T-CRY-1 runs
+  on a fresh vault at the production floor. `tests/kdf_region.rs` is T-MEM-7
+  (one test per crate, so no other thread maps memory during the
+  `/proc/self/maps` check). A child process with `RLIMIT_MEMLOCK` = 0
+  checks `--require-locked-kdf`.
+- **Golden vectors.** Four vaults (`tests/vectors/`, `MANIFEST` in a
+  line-based hex format), generated once; the generator refuses to run
+  while `MANIFEST` exists. `scripts/verify_golden.py` re-implements
+  Section 6.2 and the body parser with argon2-cffi and libsodium (CI job
+  `compat`, with a tampered-copy negative control).
+- **T-FUZZ-3** (`fuzz/fuzz_targets/fuzz_open.rs`): mode byte, then either a
+  file unlocked with the golden password (KDF cost capped at 256 KiB and 4
+  passes per input; costlier headers take the post-KDF path) or a body
+  that is saved under a fresh vault and must round-trip exactly when
+  `parse_body` accepts it. The fuzz crate's `testkdf` feature is enabled
+  only for this target (`required-features`), so `fuzz_header` keeps the
+  production floor. Sandbox run (stable, `-s none`, 60 s): about 295,000
+  execs, clean.
+- **Test speed.** `[profile.dev.package."*"] opt-level = 3` optimises
+  dependencies (Argon2, ChaCha20, proptest) in dev and test builds; pwv
+  itself stays unoptimised with debug assertions. Release builds are
+  unaffected.
+- **Miri (T-SAN-2).** CI runs Miri on the `crypto`/`vault` tests that fit
+  an interpreter (KATs, primitives, lifecycle, T-CRY-2, -4, -6), which also
+  covers the `KdfRegion` cast. The heavy sweeps (T-CRY-1, -3, -5), the 6 MiB
+  capacity case, file I/O, and child processes (Miri isolation) run
+  natively. Under Miri the test arena is 256 KiB, not 1 MiB.
+- **LOC after M3.** `crypto + format` 666 / 750; `vault` 196 / 300 (the
+  lifecycle). M5's model operations must fit the remaining 104 lines of
+  `vault`'s cap (target 250); a decision may be needed then.
 

@@ -3,9 +3,10 @@
 A single-binary, Linux-first terminal password manager written in Rust,
 specified in `rust_password_manager_specification.md` (one level up).
 
-**Status: M2 (format).** Process hardening, the secure arena, the zeroizing
-allocator, and the vault file format (`FORMAT.md`, `src/format.rs`) exist;
-no commands yet. The binary hardens itself, waits for one line on the
+**Status: M3 (cryptography).** Process hardening, the secure arena, the
+zeroizing allocator, the vault file format (`FORMAT.md`, `src/format.rs`),
+and the key hierarchy (`src/crypto.rs`; init, unlock, save, and passwd at
+library level in `src/vault.rs`) exist; no commands yet. The binary hardens itself, waits for one line on the
 terminal, and exits with code 5.
 
 ## Building and checking
@@ -20,10 +21,14 @@ cargo deny --locked check && cargo audit --deny warnings        # T-SUPPLY-1
 cargo test --locked                       # T-MEM-1, T-MEM-6, T-ENG-5, ...
 cargo test --locked --features memtest    # T-MEM-2, T-MEM-3
 cargo test --locked --release             # T-MEM-5 (release binary)
-cargo test --locked --features testkdf    # T-FMT-* with the testkdf KDF floor
+cargo test --locked --features testkdf    # T-FMT-*, T-COMPAT-1, T-CRY-1 on golden vaults
+cargo test --locked --features memtest,testkdf --test kdf_region   # T-MEM-7
+cargo test --locked --test crypto         # T-KAT-1, T-KAT-2, T-CRY-1 .. T-CRY-6
+python3 -I scripts/verify_golden.py       # T-COMPAT-1, independently (argon2-cffi, pynacl)
 cargo test --locked --test format --test format_alloc   # T-FMT-1 .. T-FMT-4
 cargo +nightly miri test --no-default-features --test format   # T-SAN-2 (format)
 cargo +nightly fuzz run fuzz_body -- -max_total_time=60   # T-FUZZ-2 (see fuzz/README.md)
+cargo +nightly fuzz run --features testkdf fuzz_open -- -max_total_time=60   # T-FUZZ-3
 ```
 
 The quick start, command reference, migration checklist (spec Section 12.3)

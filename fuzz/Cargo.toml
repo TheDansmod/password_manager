@@ -14,6 +14,12 @@ libfuzzer-sys = "0.4.12"
 # No clipboard/strength: the fuzzed code is pure and needs neither.
 pwv = { path = "..", default-features = false }
 
+[features]
+# T-FUZZ-3 runs with the lowered KDF floor: `cargo fuzz run fuzz_open
+# --features testkdf`. Kept off for the other targets, so fuzz_header still
+# sees the production read floor.
+testkdf = ["pwv/testkdf"]
+
 [workspace]
 members = ["."]
 
@@ -34,3 +40,12 @@ path = "fuzz_targets/fuzz_body.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_open"
+path = "fuzz_targets/fuzz_open.rs"
+test = false
+doc = false
+bench = false
+required-features = ["testkdf"]
+

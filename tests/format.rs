@@ -674,11 +674,7 @@ fn t_fmt_2_entry_count_0_max_max_plus_1() {
         parse_body(&raw_body(u32::MAX, &[])).err(),
         Some(Error::EntryCount)
     );
-    // 10,000 real records are out of reach for Miri; the record loop runs
-    // there on smaller bodies. DESIGN_NOTES.md (M2).
-    if cfg!(miri) {
-        return;
-    }
+    // Under Miri this runs as its own CI job (it is slow, not stalled).
     let names: Vec<Vec<u8>> = (0..=MAX_ENTRIES)
         .map(|i| format!("e{i:05}").into_bytes())
         .collect();

@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod vaults;
+
 use std::process::{Command, Output};
 
 /// Re-runs this test binary, executing only `test_name`, with `env` set.
