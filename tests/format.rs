@@ -338,7 +338,14 @@ fn t_fmt_2_body_length() {
         BLOCK - 1,
         BLOCK + 1,
         2 * BLOCK - 1,
-        MAX_PAYLOAD + BLOCK,
+        // A 16 MiB buffer is out of reach for Miri (the zeroizing allocator
+        // wipes and verifies it byte by byte); the length check is O(1), so
+        // the small lengths exercise the same code. DESIGN_NOTES.md (M2).
+        if cfg!(miri) {
+            3 * BLOCK - 1
+        } else {
+            MAX_PAYLOAD + BLOCK
+        },
     ] {
         let b = raw_body_full(0, 0, &[], len);
         assert_eq!(parse_body(&b).err(), Some(Error::BodyLength), "len {len}");
@@ -657,6 +664,21 @@ fn t_fmt_2_content_len_0_max_max_plus_1() {
 
 #[test]
 fn t_fmt_2_entry_count_0_max_max_plus_1() {
+    // entry_count is bounded before any record is read, so max + 1 is
+    // rejected even with no records present.
+    assert_eq!(
+        parse_body(&raw_body(MAX_ENTRIES + 1, &[])).err(),
+        Some(Error::EntryCount)
+    );
+    assert_eq!(
+        parse_body(&raw_body(u32::MAX, &[])).err(),
+        Some(Error::EntryCount)
+    );
+    // 10,000 real records are out of reach for Miri; the record loop runs
+    // there on smaller bodies. DESIGN_NOTES.md (M2).
+    if cfg!(miri) {
+        return;
+    }
     let names: Vec<Vec<u8>> = (0..=MAX_ENTRIES)
         .map(|i| format!("e{i:05}").into_bytes())
         .collect();
@@ -670,10 +692,6 @@ fn t_fmt_2_entry_count_0_max_max_plus_1() {
     let c: Vec<u8> = names.iter().flat_map(|n| rec_entry(n, &[])).collect();
     assert_eq!(
         parse_body(&raw_body(MAX_ENTRIES + 1, &c)).err(),
-        Some(Error::EntryCount)
-    );
-    assert_eq!(
-        parse_body(&raw_body(u32::MAX, &[])).err(),
         Some(Error::EntryCount)
     );
 }
@@ -928,6 +946,7 @@ fn t_fmt_3_truncated_body_at_every_offset() {
 
 /// Seed inputs for the fuzz targets (spec Section 14.10: corpus committed
 /// and seeded). Golden vectors are added to the seeds in M3.
+#[cfg_attr(miri, allow(dead_code))] // its only caller is not(miri)
 fn corpus_seeds() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     let mut big = sample_model();
     big.push((

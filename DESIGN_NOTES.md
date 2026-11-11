@@ -367,7 +367,15 @@ one (static.rust-lang.org is blocked, and the rustup home is read-only).
 - **Miri (T-SAN-2).** Under `cfg(miri)` only: proptest runs 8 cases without
   failure persistence, and two tests are compiled out: the 16 MiB body (out
   of reach for an interpreter; the same loop runs on small bodies) and the
-  corpus-file check (file I/O under Miri isolation). The native run is
+  corpus-file check (file I/O under Miri isolation). Also reduced under Miri
+  (2026-11-11, after the first CI Miri run stalled for 25 min inside
+  `t_fmt_2_body_length`): that test's 16 MiB + 4 KiB length case becomes
+  3 × 4096 − 1 (the length check is O(1); the zeroizing allocator wipes and
+  verifies a 16 MiB buffer byte by byte, which Miri interprets), and
+  `t_fmt_2_entry_count_*` skips building 10,000 real records (max + 1 is
+  still rejected, with no records). The native run keeps every case. The
+  `testkdf` Miri run is limited to the `header` and `file` tests, the only
+  ones that read `KDF_M_MIN`. The native run is
   unchanged. Miri itself could not run in the sandbox (no nightly); see the
   entry "Miri not run".
 - A hand mutation check (12 mutants: each body and header constraint

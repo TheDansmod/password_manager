@@ -45,6 +45,7 @@ jobs:
         run: |
           cargo rustc --locked --lib --profile check -- --cfg miri -D warnings
           cargo rustc --locked --lib --profile check --features memtest -- --cfg miri -D warnings
+          cargo rustc --locked --test format --profile check --no-default-features -- --cfg miri -D warnings
       - name: T-ENG-2, T-ENG-3, T-ENG-4 (source scanners)
         run: cargo test --locked --test eng
       - name: Install tokei
@@ -114,10 +115,20 @@ jobs:
         run: |
           rustup toolchain install nightly --profile minimal --component miri
           cargo +nightly miri setup
+      # --report-time prints each test's duration, so a slow test is named in
+      # the log. Step timeouts fail with a clear message before the job limit.
       - name: T-SAN-2 Miri on format
-        run: cargo +nightly miri test --locked --no-default-features --test format
+        timeout-minutes: 75
+        run: >-
+          cargo +nightly miri test --locked --no-default-features --test format
+          -- -Zunstable-options --report-time
       - name: T-SAN-2 Miri on format (testkdf)
-        run: cargo +nightly miri test --locked --no-default-features --features testkdf --test format
+        # testkdf changes only KDF_M_MIN, which only parse_header reads:
+        # run the header and file (split_file) tests, not the whole suite again.
+        timeout-minutes: 30
+        run: >-
+          cargo +nightly miri test --locked --no-default-features --features testkdf
+          --test format -- header file -Zunstable-options --report-time
 
   coredump:
     # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner
