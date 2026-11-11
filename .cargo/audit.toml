@@ -1,0 +1,4 @@
+# cargo-audit configuration (T-SUPPLY-1). Mirrors deny.toml's [advisories].
+[advisories]
+# pin-utils unmaintained; dev-only via expectrl -> nix. DESIGN_NOTES.md 2026-11-10.
+ignore = ["RUSTSEC-2026-0441"]

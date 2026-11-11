@@ -1,0 +1,7 @@
+# Link hardening (spec Section 15.1): full RELRO, immediate binding. PIE is
+# the default for these targets.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-z,relro,-z,now"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-z,relro,-z,now"]

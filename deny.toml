@@ -1,0 +1,56 @@
+# T-SUPPLY-1 (spec Sections 3 and 14.12). Run: cargo deny --locked check
+
+[graph]
+# v1 scope is Linux on x86_64 and aarch64 (Section 1). Restricting the graph to
+# these targets keeps Windows/macOS-only transitive crates out of the audit.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+unmaintained = "all"
+ignore = [
+    # pin-utils 0.1.1 is unmaintained (archived upstream); no vulnerability.
+    # Dev-only: expectrl 0.9.0 (latest; PTY test harness) -> nix 0.26.4.
+    # Not linked into the pwv binary. DESIGN_NOTES.md 2026-11-10; revisit in M7.
+    { id = "RUSTSEC-2026-0441", reason = "dev-only via expectrl->nix; unmaintained, not vulnerable" },
+]
+
+[licenses]
+version = 2
+# Allow-list from Section 14.12. Each SPDX expression must be satisfiable
+# from this list alone.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+confidence-threshold = 0.93
+# The allow-list is the spec's; entries not currently used are kept.
+unused-allowed-license = "allow"
+
+[bans]
+# "Bans duplicate major versions" (Section 14.12).
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+# Every skip is justified, with a date, in DESIGN_NOTES.md.
+skip = [
+    # Transitive only, inside arboard's Wayland backend: petgraph 0.8.3 needs
+    # hashbrown ^0.15, while indexmap >= 2.13 (forced graph-wide by the dev-only
+    # proptest -> bit-vec -> borsh chain) uses 0.17. See DESIGN_NOTES.md,
+    # 2026-11-10. Remove when petgraph moves to hashbrown 0.17.
+    { crate = "hashbrown@0.15.5", reason = "petgraph 0.8.3 pin; DESIGN_NOTES.md 2026-11-10" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

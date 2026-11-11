@@ -1,0 +1,123 @@
+# CI for pwv (spec Section 15.3). M0: `lint`, `supply`. M1: `test`.
+# M2: `fuzz-smoke`, `sanitizers` (Miri on format), testkdf test build.
+# Later milestones add e2e, fuzz, sanitizer, coverage, and release jobs.
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * *" # daily, for `supply` (new advisories)
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_DENY_VERSION: "0.20.2"
+  CARGO_AUDIT_VERSION: "0.23.0"
+  TOKEI_VERSION: "15.0.0"
+  CARGO_FUZZ_VERSION: "0.13.2"
+
+jobs:
+  lint:
+    # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: T-ENG-1 rustfmt
+        run: cargo fmt --all --check
+      - name: T-ENG-1/T-ENG-4 clippy (default features)
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: T-ENG-1/T-ENG-4 clippy (all features)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: T-ENG-1/T-ENG-4 clippy (no default features)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+      - name: T-ENG-1/T-ENG-4 clippy (memtest)
+        run: cargo clippy --locked --all-targets --features memtest -- -D warnings
+      - name: cfg(miri) heap backend compiles (Miri itself runs in `sanitizers`)
+        run: |
+          cargo rustc --locked --lib --profile check -- --cfg miri -D warnings
+          cargo rustc --locked --lib --profile check --features memtest -- --cfg miri -D warnings
+      - name: T-ENG-2, T-ENG-3, T-ENG-4 (source scanners)
+        run: cargo test --locked --test eng
+      - name: Install tokei
+        run: cargo install --locked tokei --version "$TOKEI_VERSION"
+      - name: T-ENG-6 LOC budget
+        run: python3 -I scripts/loc_budget.py src
+
+  test:
+    # M1 gate: T-MEM-1, T-MEM-2, T-MEM-3, T-MEM-5 (release), T-MEM-6, T-ENG-5.
+    # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
+    # for T-MEM-5's ptrace / /proc/<pid>/mem refusal.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
+        run: cargo test --locked
+      - name: Debug, memtest (T-MEM-2, T-MEM-3)
+        run: cargo test --locked --features memtest
+      - name: Release (T-MEM-5 against the release binary)
+        run: cargo test --locked --release
+      - name: Debug, testkdf (T-FMT-* with the lowered KDF read floor)
+        run: cargo test --locked --features testkdf
+
+  fuzz-smoke:
+    # T-FUZZ-1, T-FUZZ-2 (M2): 60 s per target, ASan, on every push.
+    # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
+    # no input slower than 1 s, round-trip identity (asserted in-target).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_header, fuzz_body]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
+      - name: Fuzz ${{ matrix.target }} for 60 s
+        run: |
+          mkdir -p "$RUNNER_TEMP/corpus"
+          cargo +nightly fuzz run ${{ matrix.target }} "$RUNNER_TEMP/corpus" \
+            fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=60 -rss_limit_mb=256 -malloc_limit_mb=64 \
+            -timeout=1 -max_len=24576
+      - name: Upload crash artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  sanitizers:
+    # T-SAN-2 (M2: format). Nightly only. T-SAN-1 (ASan) is added in M9.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly with Miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri
+          cargo +nightly miri setup
+      - name: T-SAN-2 Miri on format
+        run: cargo +nightly miri test --locked --no-default-features --test format
+      - name: T-SAN-2 Miri on format (testkdf)
+        run: cargo +nightly miri test --locked --no-default-features --features testkdf --test format
+
+  supply:
+    # T-SUPPLY-1.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny and cargo-audit
+        run: |
+          cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
+          cargo install --locked cargo-audit --version "$CARGO_AUDIT_VERSION"
+      - name: cargo deny (advisories, bans, licenses, sources)
+        run: cargo deny --locked check
+      - name: cargo audit
+        run: cargo audit --deny warnings

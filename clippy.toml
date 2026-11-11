@@ -1,0 +1,37 @@
+# T-ENG-4 (spec Sections 5.5, 5.7, 14.11).
+#
+# These bans apply crate-wide. The only permitted exceptions are an item-level
+# `#[allow(clippy::disallowed_methods)]` / `#[allow(clippy::disallowed_macros)]`
+# in `src/term.rs` (std stdio) and `src/store.rs` (file creation). tests/eng.rs
+# fails the build if such an allow appears in any other file.
+#
+# Note: clippy.toml cannot set lint levels, so the `clippy::pedantic` set and
+# the deny list of spec Section 15.1 are enabled by crate attributes in
+# src/lib.rs and src/main.rs (see DESIGN_NOTES.md).
+
+msrv = "1.99"
+
+disallowed-macros = [
+    { path = "std::print", reason = "Section 5.5: use term; std stdio keeps unwiped buffers" },
+    { path = "std::println", reason = "Section 5.5: use term; std stdio keeps unwiped buffers" },
+    { path = "std::eprint", reason = "Section 5.5: use term; std stdio keeps unwiped buffers" },
+    { path = "std::eprintln", reason = "Section 5.5: use term; std stdio keeps unwiped buffers" },
+    { path = "std::dbg", reason = "Section 5.5 / rule 9: never print while debugging" },
+]
+
+disallowed-methods = [
+    { path = "std::io::stdin", reason = "Section 5.5: use term" },
+    { path = "std::io::stdout", reason = "Section 5.5: use term" },
+    { path = "std::io::stderr", reason = "Section 5.5: use term" },
+    { path = "std::process::Command::new", reason = "Section 5.7: no child processes" },
+    { path = "std::fs::write", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "std::fs::File::create", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "std::fs::File::create_new", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "rand::thread_rng", reason = "S3: getrandom only", allow-invalid = true },
+    { path = "rand::rng", reason = "S3: getrandom only", allow-invalid = true },
+]
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true

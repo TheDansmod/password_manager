@@ -1,0 +1,57 @@
+[package]
+name = "pwv"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Single-binary, Linux-first terminal password manager"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pwv"
+path = "src/main.rs"
+
+# Runtime dependencies: exactly the set of spec Section 3. Versions are pinned
+# exactly in Cargo.lock; builds use --locked.
+[dependencies]
+argon2 = { version = "0.6.0", default-features = false, features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+zeroize = "1.9.1"
+getrandom = "0.4.3"
+rustix = { version = "1.1.6", features = ["event", "fs", "mm", "param", "process", "stdio", "termios"] }
+# libc: only for calls rustix lacks (sigaction); used inside `sys` only.
+libc = "0.2.191"
+unicode-normalization = "0.1.26"
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"], optional = true }
+zxcvbn = { version = "3.1.1", default-features = false, optional = true }
+
+[dev-dependencies]
+expectrl = "0.9.0"
+proptest = "1.12.0"
+rand_chacha = "0.10.0"
+static_assertions = "1.1.0"
+tempfile = "3.27.0"
+
+[features]
+default = ["clipboard", "strength"]
+clipboard = ["dep:arboard"]
+strength = ["dep:zxcvbn"]
+# Test-only (Section 5.8). Never enabled in release artefacts (T-ENG-7).
+memtest = []
+# Test-only (Section 6.4). Never enabled in release artefacts (T-ENG-7).
+testkdf = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+overflow-checks = true
+debug = false
+strip = "symbols"
+
+[profile.dev]
+panic = "unwind"

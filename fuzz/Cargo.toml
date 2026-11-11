@@ -1,0 +1,36 @@
+# cargo-fuzz targets (spec Section 14.10). Separate crate, not a workspace
+# member of pwv; dev-only, so outside the runtime dependency budget.
+[package]
+name = "pwv-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.12"
+# No clipboard/strength: the fuzzed code is pure and needs neither.
+pwv = { path = "..", default-features = false }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+overflow-checks = true
+
+[[bin]]
+name = "fuzz_header"
+path = "fuzz_targets/fuzz_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_body"
+path = "fuzz_targets/fuzz_body.rs"
+test = false
+doc = false
+bench = false
