@@ -330,7 +330,7 @@ one (static.rust-lang.org is blocked, and the rustup home is read-only).
   `format_version`, `flags`, `kdf_id`, reserved, or `kdf_p`; `encode` writes
   their only valid values. The write floor (m ≥ 65,536, t ≥ 3) is enforced
   where headers are created (M3), not by `encode`.
-- **LOC: OPEN, needs owner decision before M3 ends.** `format` alone is
+- **LOC: RESOLVED (see 2026-11-11 below).** `format` alone is
   **458** (group target 450, hard cap 550), after one simplification pass
   (from 494: the `Body` wrapper, a misuse error variant, and a hand-rolled
   header copy loop were removed). The spec's "about 300 lines" for the
@@ -394,3 +394,41 @@ one (static.rust-lang.org is blocked, and the rustup home is read-only).
   `-s none` (no ASan; ASan needs nightly). 60 s each, clean:
   `fuzz_header` ≈ 151 M execs, `fuzz_body` ≈ 774 K execs, RSS ≈ 28 MB.
   CI's `fuzz-smoke` runs the same with nightly and ASan.
+
+## 2026-11-11 — RESOLVED: LOC caps for `crypto + format` and Total
+
+**Owner decision (2026-11-11):** the Section 3 table now reads hard cap
+**750** for `crypto + format` (was 550; +200) and **3,000** for the Total
+(was 2,700). Targets are unchanged. `scripts/loc_budget.py` matches.
+Justification: the M2 entry above (`format` is 458 lines, about 100 of them
+the per-constraint error enum that T-FMT-2 and Section 12.2 require, leaving
+92 lines for M3's `crypto`, estimated at 130–200).
+
+## 2026-11-11 — First CI run: fixes, and all gates on every push
+
+- **T-MEM-5 race (test failure).** GitHub runners start processes with a
+  soft core limit of 0 and a hard limit of `unlimited`. The test waited for
+  "soft limit == 0" as its signal that `harden()` had run, so on CI it read
+  `/proc/<pid>/limits` before `harden()` ran and saw `0 unlimited`. The
+  test now waits for the observable end state of steps 1–3 (core `{0, 0}`,
+  non-dumpable, umask 0077, or a 10 s deadline), then re-reads every value
+  it asserts. Reproduced and verified locally with `ulimit -Sc 0`.
+- **`fuzz_body` out-of-memory (fuzz-smoke failure).** No leak and no large
+  allocation: ASan's quarantine keeps freed blocks resident (256 MiB by
+  default on x86_64), and `-rss_limit_mb=256` counts them. `fuzz_body`
+  allocates an output buffer per input; `fuzz_header` allocates nothing,
+  which is why only `fuzz_body` failed. `fuzz-smoke` now sets
+  `ASAN_OPTIONS=quarantine_size_mb=32`; `-rss_limit_mb=256` and
+  `-malloc_limit_mb=64` (the "no allocation above 64 MiB" invariant) stay as
+  specified. (Inferred: the log excerpt lacked libFuzzer's detail line.)
+- **Miri (T-SAN-2) on every push.** Section 15.3 schedules `sanitizers`
+  nightly; it now also runs on every push (it was skipped on the first push),
+  so the M2 gate does not depend on a local nightly toolchain. Running more
+  often than specified is a strict superset.
+- **New `coredump` job: T-MEM-5's "no `coredumpctl` entry".** On the runner:
+  install `systemd-coredump`, apply its `core_pattern`, set
+  `fs.suid_dumpable = 0` (the host the 2026-11-10 owner decision assumes),
+  run a positive control (a dumpable process killed by SIGSEGV *is*
+  recorded, so the check is not vacuous), run T-MEM-5 against the release
+  binary, then fail if `coredumpctl list pwv` finds an entry.
+

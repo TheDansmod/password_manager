@@ -7,11 +7,13 @@ Smoke run, as in CI (`fuzz-smoke`), from the repository root:
 
 ```sh
 mkdir -p /tmp/corpus-fuzz_body
-cargo +nightly fuzz run fuzz_body /tmp/corpus-fuzz_body fuzz/corpus/fuzz_body -- \
+ASAN_OPTIONS=quarantine_size_mb=32 cargo +nightly fuzz run fuzz_body /tmp/corpus-fuzz_body fuzz/corpus/fuzz_body -- \
   -max_total_time=60 -rss_limit_mb=256 -malloc_limit_mb=64 -timeout=1 -max_len=24576
 ```
 
-The scratch corpus comes first, so new units do not land in the committed
+`quarantine_size_mb=32`: ASan's default 256 MiB quarantine of freed blocks
+counts towards `-rss_limit_mb=256` and trips it without any leak
+(DESIGN_NOTES.md, 2026-11-11). The scratch corpus comes first, so new units do not land in the committed
 corpus. On stable Rust, add `-s none` (no AddressSanitizer).
 
 `corpus/<target>/seed-*` are generated and checked by

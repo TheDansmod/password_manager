@@ -1,6 +1,10 @@
-# CI for pwv (spec Section 15.3). M0: `lint`, `supply`. M1: `test`.
-# M2: `fuzz-smoke`, `sanitizers` (Miri on format), testkdf test build.
-# Later milestones add e2e, fuzz, sanitizer, coverage, and release jobs.
+# CI for pwv (spec Section 15.3). M0: `lint`, `supply`. M1: `test`,
+# `coredump` (T-MEM-5's coredumpctl clause). M2: `fuzz-smoke`, `sanitizers`
+# (Miri on format), testkdf test build.
+# Every gate of the milestones done so far runs on every push, so no local
+# nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
+# as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
+# mutants, durability, and release jobs.
 name: ci
 
 on:
@@ -69,6 +73,13 @@ jobs:
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
     runs-on: ubuntu-latest
+    env:
+      # ASan's quarantine keeps freed blocks resident (256 MiB by default on
+      # x86_64), and libFuzzer's -rss_limit_mb counts them, so a target that
+      # allocates per input (fuzz_body's output buffer) hits the 256 MiB limit
+      # without any leak. Cap the quarantine; -malloc_limit_mb still enforces
+      # "no allocation above 64 MiB". DESIGN_NOTES.md, 2026-11-11.
+      ASAN_OPTIONS: quarantine_size_mb=32:detect_leaks=1
     strategy:
       fail-fast: false
       matrix:
@@ -94,9 +105,9 @@ jobs:
           path: fuzz/artifacts
 
   sanitizers:
-    # T-SAN-2 (M2: format). Nightly only. T-SAN-1 (ASan) is added in M9.
-    if: github.event_name == 'schedule'
+    # T-SAN-2 (M2: format). Every push and nightly. T-SAN-1 (ASan) is added in M9.
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Install nightly with Miri
@@ -107,6 +118,53 @@ jobs:
         run: cargo +nightly miri test --locked --no-default-features --test format
       - name: T-SAN-2 Miri on format (testkdf)
         run: cargo +nightly miri test --locked --no-default-features --features testkdf --test format
+
+  coredump:
+    # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner
+    # decision assumes (DESIGN_NOTES.md: suid_dumpable = 0) with
+    # systemd-coredump as the piped core_pattern. A positive control first
+    # proves that a crash of a dumpable process does produce an entry here,
+    # so the negative check is not vacuous.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install systemd-coredump; set suid_dumpable = 0
+        run: |
+          sudo systemctl disable --now apport.service 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y systemd-coredump
+          sudo sysctl -p /usr/lib/sysctl.d/50-coredump.conf
+          sudo sysctl -w fs.suid_dumpable=0
+          sudo systemctl start systemd-coredump.socket
+          sysctl kernel.core_pattern fs.suid_dumpable
+          case "$(sysctl -n kernel.core_pattern)" in
+            *systemd-coredump*) ;;
+            *) echo "core_pattern is not systemd-coredump"; exit 1 ;;
+          esac
+      - name: Positive control (a dumpable crash is recorded)
+        run: |
+          cp /bin/sleep "$RUNNER_TEMP/pwvctl"
+          ulimit -c unlimited
+          "$RUNNER_TEMP/pwvctl" 60 & pid=$!
+          sleep 1; kill -SEGV "$pid"; wait "$pid" || true
+          for _ in $(seq 30); do
+            coredumpctl --no-pager list pwvctl && exit 0
+            sleep 1
+          done
+          echo "systemd-coredump recorded nothing; the check below would be vacuous"
+          exit 1
+      - name: Build release tests
+        run: cargo test --locked --release --test harden --no-run
+      - name: T-MEM-5 (release)
+        run: cargo test --locked --release --test harden t_mem_5
+      - name: No coredumpctl entry for pwv
+        run: |
+          sleep 10 # systemd-coredump processes crashes asynchronously
+          if coredumpctl --no-pager list pwv; then
+            echo "T-MEM-5: coredumpctl has an entry for pwv"
+            exit 1
+          fi
+          coredumpctl --no-pager list || true
 
   supply:
     # T-SUPPLY-1.

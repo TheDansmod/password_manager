@@ -20,14 +20,14 @@ import tempfile
 # to the cli + main group, the conservative choice (DESIGN_NOTES.md).
 GROUPS = [
     ("sys + secmem + alloc", ["sys.rs", "secmem.rs", "alloc.rs"], 400, 800),
-    ("crypto + format", ["crypto.rs", "format.rs"], 450, 550),
+    ("crypto + format", ["crypto.rs", "format.rs"], 450, 750),
     ("store", ["store.rs"], 250, 300),
     ("vault", ["vault.rs"], 250, 300),
     ("gen", ["gen.rs"], 150, 200),
     ("term + clip", ["term.rs", "clip.rs"], 300, 350),
     ("cli + main", ["cli.rs", "main.rs", "lib.rs"], 400, 500),
 ]
-TOTAL_TARGET, TOTAL_CAP = 2200, 2700
+TOTAL_TARGET, TOTAL_CAP = 2200, 3000
 
 
 def strip_cfg_test(text: str) -> str:

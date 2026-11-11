@@ -108,41 +108,56 @@ fn t_mem_5_core_limit_ptrace_mem_and_sigsegv() {
     let mut session = expectrl::session::Session::spawn(cmd).expect("spawn pwv under a pty");
     let pid = session.get_process().pid().as_raw();
 
-    // Wait until harden() has run (limits change from the inherited ones).
+    // Wait until harden() has run. The inherited limits cannot be the signal:
+    // CI runners start processes with a soft core limit of 0 already (hard
+    // unlimited), so "soft == 0" is true before harden() runs. Wait instead
+    // for the observable end state of steps 1-3 (core {0, 0}, non-dumpable,
+    // umask 0077), then re-read everything for the assertions below.
     let limits_path = format!("/proc/{pid}/limits");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let core_row = loop {
-        let limits = std::fs::read_to_string(&limits_path).expect("limits");
-        let row = limits
+    let status_path = format!("/proc/{pid}/status");
+    let core_row = || {
+        std::fs::read_to_string(&limits_path)
+            .expect("limits")
             .lines()
             .find(|l| l.starts_with("Max core file size"))
             .expect("core row")
-            .to_owned();
-        if row.split_whitespace().nth(4) == Some("0") || Instant::now() > deadline {
-            break row;
+            .to_owned()
+    };
+    let me = std::fs::metadata("/proc/self/mem").expect("self mem").uid();
+    let mem_owner = || {
+        std::fs::metadata(format!("/proc/{pid}/mem"))
+            .expect("mem meta")
+            .uid()
+    };
+    let umask_077 = || {
+        std::fs::read_to_string(&status_path)
+            .expect("status")
+            .lines()
+            .any(|l| l == "Umask:\t0077")
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let row = core_row();
+        let f: Vec<&str> = row.split_whitespace().collect();
+        let done = (f[4], f[5]) == ("0", "0") && mem_owner() != me && umask_077();
+        if done || Instant::now() > deadline {
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
-    };
-    // Some(time) for the umask, after which every hardening step has run.
+    }
+    // Some time for step 6 (RLIMIT_MEMLOCK), which runs after the umask.
     std::thread::sleep(Duration::from_millis(100));
 
     // Step 1: soft and hard core limit 0.
-    let f: Vec<&str> = core_row.split_whitespace().collect();
-    assert_eq!((f[4], f[5]), ("0", "0"), "core limit: {core_row}");
+    let row = core_row();
+    let f: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!((f[4], f[5]), ("0", "0"), "core limit: {row}");
 
     // Step 2: non-dumpable => /proc/<pid> files are no longer owned by us.
-    let me = std::fs::metadata("/proc/self/mem").expect("self mem").uid();
-    let owner = std::fs::metadata(format!("/proc/{pid}/mem"))
-        .expect("mem meta")
-        .uid();
-    assert_ne!(owner, me, "process is still dumpable");
+    assert_ne!(mem_owner(), me, "process is still dumpable");
 
     // Step 3: umask 0077.
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).expect("status");
-    assert!(
-        status.lines().any(|l| l == "Umask:\t0077"),
-        "umask not 0077"
-    );
+    assert!(umask_077(), "umask not 0077");
 
     // Step 6: soft RLIMIT_MEMLOCK raised to the hard limit.
     let limits = std::fs::read_to_string(&limits_path).expect("limits");
