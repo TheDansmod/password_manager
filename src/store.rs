@@ -23,9 +23,17 @@ pub const BACKUPS: u8 = 5;
 const STATE_MAX: u64 = 1 << 20;
 /// `statfs` magic numbers of filesystems with synthetic permission bits
 /// (Section 8.2 step 3): FUSE (`fuseblk`, i.e. ntfs-3g; `statfs` reports
-/// one magic for every FUSE mount), `ntfs3`, legacy `ntfs`, `vfat`/`msdos`,
-/// `exfat`.
-const FOREIGN_FS: [u32; 5] = [0x6573_5546, 0x7366_746e, 0x5346_544e, 0x4d44, 0x2011_bab0];
+/// one magic for every FUSE mount, so WSL2 virtiofs too), `ntfs3`, legacy
+/// `ntfs`, `vfat`/`msdos`, `exfat`, and `9p` (WSL2 `DrvFs`: bits are
+/// synthetic unless mounted with `metadata`; owner decision 2026-11-11).
+const FOREIGN_FS: [u32; 6] = [
+    0x6573_5546,
+    0x7366_746e,
+    0x5346_544e,
+    0x4d44,
+    0x2011_bab0,
+    0x0102_1997,
+];
 
 /// A storage failure. Messages are fixed, except that [`Error::Mode`]
 /// carries the exact `chmod` remedy.
@@ -411,7 +419,12 @@ impl Store {
         let dir = self.dir.as_fd();
         for i in (1..BACKUPS).rev() {
             self.step("rotate");
-            match sys::rename_at(dir, &self.backup(i), &self.backup(i + 1)) {
+            // rename(2) does nothing when both names link one inode, which
+            // repeated crashes after the link below leave behind; the
+            // older name is then a duplicate and must go, or `link` fails.
+            match sys::rename_at(dir, &self.backup(i), &self.backup(i + 1))
+                .and_then(|()| sys::unlink_at(dir, &self.backup(i)))
+            {
                 Ok(()) | Err(Errno::NOENT) => {}
                 Err(e) => return Err(e.into()),
             }
@@ -656,42 +669,61 @@ mod tests {
                 let tmp = tempfile::tempdir().unwrap();
                 let p = paths(tmp.path());
                 setup(&p, prior);
-                let (st, _) = Store::open(p.clone(), false).unwrap();
-                let mut n = 0;
-                let mut st = hooked(st, move |pt| {
-                    assert!(n != k, "injected crash at {pt}");
-                    n += 1;
-                    fail_link && pt == "link"
-                });
-                let crashed = catch_unwind(AssertUnwindSafe(move || st.save(&file(prior + 1))));
-                assert!(crashed.is_err(), "{ctx}: no crash");
-
-                // Restart: open never fails and yields exactly old or new.
-                let (mut st, got) =
-                    Store::open(p.clone(), false).unwrap_or_else(|e| panic!("{ctx}: {e:?}"));
-                let new = k > vault_rename;
-                assert_eq!(got, file(if new { prior + 1 } else { prior }), "{ctx}");
-                let h = format::parse_header(&got).unwrap();
-                assert_eq!(st.freshness(&h).unwrap(), Freshness::Fresh, "{ctx}");
-                let want = if k > state_rename { prior + 1 } else { prior };
-                assert_eq!(recorded(&p), want, "{ctx}");
                 let vdir = p.vault.parent().unwrap();
-                assert!(
-                    names(vdir).iter().all(|n| !n.contains(".tmp.")),
-                    "{ctx}: {:?}",
-                    names(vdir)
-                );
-                for i in 1..=BACKUPS {
-                    if let Ok(b) = fs::read(vdir.join(format!("vault.pwv.{i}"))) {
-                        assert!((1..=prior + 1).any(|g| b == file(g)), "{ctx}: backup .{i}");
+                // The same crash repeated more times than there are backups:
+                // a crash after step 2's link leaves `.1` linked to the
+                // vault, and repeats make every backup a link to it.
+                let (mut st, _) = Store::open(p.clone(), false).unwrap();
+                for _ in 0..=BACKUPS {
+                    let mut n = 0;
+                    let mut hk = hooked(st, move |pt| {
+                        assert!(n != k, "injected crash at {pt}");
+                        n += 1;
+                        fail_link && pt == "link"
+                    });
+                    let crashed = catch_unwind(AssertUnwindSafe(move || hk.save(&file(prior + 1))));
+                    assert!(crashed.is_err(), "{ctx}: no crash: {:?}", crashed.ok());
+
+                    // Restart: open never fails and yields exactly old or new.
+                    let got;
+                    (st, got) =
+                        Store::open(p.clone(), false).unwrap_or_else(|e| panic!("{ctx}: {e:?}"));
+                    let new = k > vault_rename;
+                    assert_eq!(got, file(if new { prior + 1 } else { prior }), "{ctx}");
+                    let h = format::parse_header(&got).unwrap();
+                    assert_eq!(st.freshness(&h).unwrap(), Freshness::Fresh, "{ctx}");
+                    let want = if k > state_rename { prior + 1 } else { prior };
+                    assert_eq!(recorded(&p), want, "{ctx}");
+                    assert!(
+                        names(vdir).iter().all(|n| !n.contains(".tmp.")),
+                        "{ctx}: {:?}",
+                        names(vdir)
+                    );
+                    for i in 1..=BACKUPS {
+                        if let Ok(b) = fs::read(vdir.join(format!("vault.pwv.{i}"))) {
+                            assert!((1..=prior + 1).any(|g| b == file(g)), "{ctx}: backup .{i}");
+                        }
                     }
                 }
-                // Recovery: the next save completes normally.
-                st.save(&file(prior + 2)).unwrap();
+                // Recovery: the next saves complete normally, through a
+                // whole cycle of the backups (a crash after step 2's link
+                // leaves `.1` linked to the vault; it must not break a
+                // later rotation).
+                let last = prior + 2 + u64::from(BACKUPS);
+                for g in prior + 2..=last {
+                    st.save(&file(g))
+                        .unwrap_or_else(|e| panic!("{ctx}: recovery save {g}: {e:?}"));
+                }
                 drop(st);
                 let (st, got) = Store::open(p.clone(), false).unwrap();
-                assert_eq!(got, file(prior + 2), "{ctx}");
-                assert_eq!(recorded(&p), prior + 2, "{ctx}");
+                assert_eq!(got, file(last), "{ctx}");
+                assert_eq!(recorded(&p), last, "{ctx}");
+                assert_eq!(fs::metadata(&p.vault).unwrap().nlink(), 1, "{ctx}");
+                for i in 1..=BACKUPS {
+                    let b = vdir.join(format!("vault.pwv.{i}"));
+                    assert_eq!(fs::read(&b).unwrap(), file(last - u64::from(i)), "{ctx}");
+                    assert_eq!(fs::metadata(&b).unwrap().nlink(), 1, "{ctx}: .{i}");
+                }
                 let h = format::parse_header(&got).unwrap();
                 assert_eq!(st.freshness(&h).unwrap(), Freshness::Fresh, "{ctx}");
                 let sdir = p.state.parent().unwrap();
@@ -699,11 +731,6 @@ mod tests {
                     names(sdir).iter().all(|n| !n.contains(".tmp.")),
                     "{ctx}: {:?}",
                     names(sdir)
-                );
-                assert_eq!(
-                    fs::read(vdir.join("vault.pwv.1")).unwrap(),
-                    file(if new { prior + 1 } else { prior }),
-                    "{ctx}"
                 );
             }
         }

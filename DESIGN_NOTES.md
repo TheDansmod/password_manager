@@ -611,7 +611,8 @@ M5; the specification is unchanged until then.
   driver (0x5346544e) is refused along with `ntfs3`. **Open question for
   the owner:** WSL2 exposes Windows drives through 9p (`drvfs`,
   0x01021997) or virtiofs, and neither is in Section 8.2's list. Since
-  that list says "namely", they are not refused.
+  that list says "namely", they are not refused. *Resolved in the CI
+  round 1 entry below: 9p is refused.*
 - **Rollback check after authentication.** `freshness` takes the header
   returned by `vault::unlock`, never the unauthenticated bytes, so M7
   runs unlock → `freshness` → prompt. `confirm_rollback` accepts exactly
@@ -708,3 +709,54 @@ M5; the specification is unchanged until then.
   write (~70), and the locked state file (~80). A simplification pass
   went from 413 to 400; reaching 300 would mean deleting required
   behaviour. `sys` gained the file wrappers (613 / 800 for the group).
+
+## 2026-11-11 — M4 CI round 1: durability failure fixed
+
+- **CI result.** Every job passed, including the vfat loop-mount step of
+  T-STORE-1, except `durability`. T-STORE-3 failed at iteration 87
+  (seed 0xab3c76d5e01867c1): a child exited on its own instead of dying
+  by SIGKILL. Its stderr went to `/dev/null`, so the log showed no cause,
+  and the seed did not reproduce on this sandbox's tmpfs.
+- **Cause: a real bug in the save protocol, not in the test.** If a save
+  is killed after step 2's `link(vault, .1)` and before step 4's rename,
+  `.1` is a hard link to the vault. Every further crash in that window
+  shifts the duplicate up one slot. After five such crashes in a row,
+  `.1`–`.5` and the vault are all links to one inode. `rename(2)` is a
+  no-op when both names link one inode (POSIX), so the whole rotation
+  does nothing, `.1` survives, and `link` fails with EEXIST on every
+  later save. The vault stays readable, but it can never be saved again.
+  CI's ext4 `fsync` makes the temp-file write most of a child's first
+  save, so consecutive kills inside that window are likely there and
+  almost impossible on tmpfs.
+- **Why T-STORE-2 missed it.** It injected each crash once and then made
+  one recovery save. It now repeats each crash BACKUPS + 1 times at the
+  same point. Recovery then saves through a whole backup cycle and checks
+  that `.1`–`.5` hold the last five generations with `nlink == 1`. The
+  extended test failed with `Err(Io)` from `link` before the fix and
+  passes after it.
+- **Fix.** After each rotation rename, `unlink(.i)`, ignoring ENOENT. The
+  old name only still exists when the rename was a no-op, and then it
+  duplicates `.i+1`, so nothing is lost. A crash between the rename and
+  the unlink leaves the same state the next rotation already handles.
+- **Not changed: backup depth after repeated crashes.** A crash in the
+  link-to-rename window costs one backup slot, because the next rotation
+  shifts the duplicate up. That matches Section 8.3's crash table
+  ("backups shifted"). Skipping the rotation when `.1` is already the
+  vault's inode would keep the depth, but it needs inode comparison.
+  Raise it if wanted.
+- **Kill loop diagnostics.** T-STORE-3 now captures each child's stderr
+  and prints it if the child exits on its own or never becomes ready.
+- **9p refused (owner decision).** WSL2 DrvFs mounts Windows drives over
+  9p (V9FS_MAGIC 0x01021997), and its permission bits are synthetic unless
+  it is mounted with `metadata`. Under the owner's rule (refuse any
+  filesystem that allows synthetic bits), 9p joins the foreign list;
+  `--allow-foreign-fs` still waives it. WSL2's virtiofs reports the FUSE
+  magic, which is already refused. The spec's Section 8.2 "namely" list
+  does not name 9p yet; the owner edits the spec.
+- **Spec change (owner request):** Section 8.5 now says that a failed
+  save is fatal to the session, because a failure after the step 4
+  rename may already have replaced the file. M7 implements this.
+- **CI:** the `test` job has a new step, "M4 gate by name", that lists
+  every T-STORE test in the log and fails if any one did not run. T-STORE-4
+  was already running inside each `cargo test` step, but no step name
+  showed it.

@@ -95,6 +95,23 @@ jobs:
         run: cargo test --locked --features testkdf
       - name: Debug, memtest + testkdf (T-MEM-7 zero-before-munmap on a locked region)
         run: cargo test --locked --features memtest,testkdf
+      - name: M4 gate by name (T-STORE-1 .. T-STORE-7, T-STORE-9; one line each in the log)
+        # The steps above already run these in every configuration; this
+        # step lists each gate test by name and fails if one did not run.
+        run: |
+          cargo test --locked --lib store::tests 2>&1 | tee store.txt
+          cargo test --locked --test store 2>&1 | tee -a store.txt
+          for t in t_store_1_modes t_store_1_wrong_owner_via_uid_override \
+              t_store_1_wrong_owner_root_directory t_store_1_symlinks_and_file_types \
+              t_store_1_statfs_classifier t_store_2_crash_at_every_step \
+              t_store_3_kill_loop t_store_4_second_process_refused \
+              t_store_5_rollback_detected \
+              t_store_5_state_never_regresses_and_tracks_vaults_separately \
+              t_store_6_stale_temp_files_removed t_store_7_seven_saves_keep_five_backups \
+              t_store_7_copy_fallback_without_hard_links \
+              t_store_9_read_only_sessions_do_not_write; do
+            grep -Eq "^test (store::tests::)?$t \.\.\. ok$" store.txt || { echo "missing: $t"; exit 1; }
+          done
       - name: T-STORE-1 on a real foreign filesystem (vfat loop mount)
         # Refused without --allow-foreign-fs; with it, the full save protocol
         # runs, including the copy fallback (vfat has no hard links). The

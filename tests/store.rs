@@ -24,7 +24,7 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdout, Stdio};
+use std::process::Stdio;
 use std::sync::{PoisonError, RwLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -221,7 +221,7 @@ fn report(msg: &str) {
 
 /// Reads a child's stdout to the end on a thread; the receiver fires once
 /// `PWV ready` has been seen. The thread returns everything read.
-fn watch(mut out: ChildStdout) -> (mpsc::Receiver<()>, thread::JoinHandle<Vec<u8>>) {
+fn watch(mut out: impl Read + Send + 'static) -> (mpsc::Receiver<()>, thread::JoinHandle<Vec<u8>>) {
     let (tx, rx) = mpsc::channel();
     let h = thread::spawn(move || {
         let (mut all, mut buf, mut sent) = (Vec::new(), [0u8; 4096], false);
@@ -452,12 +452,19 @@ fn t_store_1_symlinks_and_file_types() {
 
 #[test]
 fn t_store_1_statfs_classifier() {
-    let foreign: [(&str, u32); 5] = [
-        ("fuseblk (ntfs-3g; all FUSE)", 0x6573_5546),
+    let foreign: [(&str, u32); 6] = [
+        (
+            "fuseblk (ntfs-3g; all FUSE, so also WSL2 virtiofs)",
+            0x6573_5546,
+        ),
         ("ntfs3", 0x7366_746e),
         ("ntfs (legacy driver)", 0x5346_544e),
         ("vfat / msdos", 0x4d44),
         ("exfat", 0x2011_bab0),
+        (
+            "9p (WSL2 DrvFs; synthetic bits without `metadata`)",
+            0x0102_1997,
+        ),
     ];
     for (name, magic) in foreign {
         assert!(store::is_foreign_fs(magic), "{name} must be refused");
@@ -615,18 +622,28 @@ fn t_store_3_kill_loop() {
         let ctx = format!("iteration {it}, seed {seed:#x}, delay {delay:?}");
         let mut child = spawn_child("store_3_child", &env)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn_locked()
             .unwrap();
         let (ready, reader) = watch(child.stdout.take().unwrap());
+        let (_, errs) = watch(child.stderr.take().unwrap());
+        let stderr = |errs: thread::JoinHandle<Vec<u8>>| {
+            String::from_utf8_lossy(&errs.join().unwrap()).into_owned()
+        };
         if ready.recv_timeout(Duration::from_secs(120)).is_err() {
             let _ = child.kill();
-            panic!("{ctx}: child never became ready");
+            let _ = child.wait();
+            panic!("{ctx}: child never became ready; stderr:\n{}", stderr(errs));
         }
         thread::sleep(delay);
         child.kill().unwrap();
         let status = child.wait().unwrap();
-        assert_eq!(status.signal(), Some(9), "{ctx}: child must die by SIGKILL");
+        let errs = stderr(errs);
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "{ctx}: child must die by SIGKILL; stderr:\n{errs}"
+        );
         let gens = reported(&reader.join().unwrap());
         // Reports are consecutive generations starting after the last state.
         for (i, g) in gens.iter().enumerate() {
