@@ -11,10 +11,10 @@
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
 # mutants, durability, and release jobs.
-# Runners are pinned to ubuntu-24.04 (ubuntu-latest moves to 26.04 from
-# 2026-10-19; a mixed fleet would make results incomparable). Moving to
-# 26.04 is a separate, deliberate change. Every job has a timeout well
-# above its normal runtime so that a stall fails fast.
+# Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
+# no functional change in the same round). Each job's timeout-minutes is
+# about 3x its runtime measured on 2026-11-11 (floor 10 min), so a stall
+# fails fast; raise a cap only together with a measured runtime.
 name: ci
 
 on:
@@ -39,8 +39,8 @@ env:
 jobs:
   lint:
     # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
@@ -87,8 +87,8 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
@@ -136,8 +136,8 @@ jobs:
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
     # models with argon2-cffi + PyNaCl (libsodium), sharing no code with pwv.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - name: Install reference implementations
@@ -163,8 +163,8 @@ jobs:
     # target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
     env:
       # ASan's quarantine keeps freed blocks resident (256 MiB by default on
       # x86_64), and libFuzzer's -rss_limit_mb counts them, so a target that
@@ -202,10 +202,10 @@ jobs:
   sanitizers:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
-    # nightly. One job per suite, in parallel, each with the 6 h job limit;
-    # --report-time names any slow test. T-SAN-1 (ASan) is added in M9.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    # nightly. One job per suite, in parallel (slowest 28.5 min on
+    # 2026-11-11, cap 90); --report-time names any slow test. T-SAN-1 (ASan) is added in M9.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -239,8 +239,8 @@ jobs:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), on every push and daily, against
     # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)
@@ -254,8 +254,8 @@ jobs:
     # systemd-coredump as the piped core_pattern. A positive control first
     # proves that a crash of a dumpable process does produce an entry here,
     # so the negative check is not vacuous.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - name: Install systemd-coredump; set suid_dumpable = 0
@@ -298,8 +298,8 @@ jobs:
 
   supply:
     # T-SUPPLY-1.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
       - name: Install cargo-deny and cargo-audit

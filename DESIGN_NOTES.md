@@ -790,3 +790,25 @@ M5; the specification is unchanged until then.
   roughly a third of runs (2 of 6 in this sandbox). It holds on CI's
   ext4, where the first save includes real `fsync`s. Rule 2 forbids
   weakening the guard, so it stays; the owner may decide otherwise.
+
+## 2026-11-11 — CI round 3: timeouts from measurements; runners to 26.04
+
+- The owner reported every job green, both deprecation messages gone,
+  and these runtimes: lint 4m10, test 21m05, compat 0m10, fuzz-smoke
+  2m41–2m54, sanitizers 12m21–28m35, durability 4m10, coredump 5m16,
+  supply 6m57.
+- **Timeouts** (about 3× the measured runtime, minimum 10 min): lint 15,
+  test 60, compat 10, fuzz-smoke 15, sanitizers 90, durability 20,
+  coredump 20, supply 25. Raise a cap only together with a new
+  measurement, for example when M9 adds LazyFS to `durability`.
+- **Runners: `ubuntu-24.04` → `ubuntu-26.04`.** On the owner's request
+  this went in a round with no functional change, so any difference in
+  results comes from the image. The parts that depend on the image:
+  `rustup` preinstalled; apt `dosfstools` (vfat step) and
+  `systemd-coredump` (coredump job); `python3 -m venv` with the pinned
+  argon2-cffi 23.1.0 and PyNaCl 1.5.0 (`compat`; both ship abi3 wheels);
+  and loop mounts under `sudo`.
+- **T-STORE-3 on CI (5,000 kills, seed 0xc4012390fca09c1b):** 101 kills
+  before the first commit, 4,899 after; 1,185 between `link` and rename,
+  with a longest run of 5. That is exactly the length that broke saves
+  before round 1's fix, so CI now exercises the regression case directly.
