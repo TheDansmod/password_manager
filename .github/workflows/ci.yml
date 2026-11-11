@@ -13,7 +13,7 @@
 # mutants, durability, and release jobs.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
-# about 3x its runtime measured on 2026-11-11 (floor 10 min), so a stall
+# about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime.
 name: ci
 
@@ -40,7 +40,7 @@ jobs:
   lint:
     # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
@@ -88,7 +88,7 @@ jobs:
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
@@ -202,10 +202,11 @@ jobs:
   sanitizers:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
-    # nightly. One job per suite, in parallel (slowest 28.5 min on
-    # 2026-11-11, cap 90); --report-time names any slow test. T-SAN-1 (ASan) is added in M9.
+    # nightly. One job per suite, in parallel (slowest 37.8 min on
+    # ubuntu-26.04, cap 115); --report-time names any slow test. T-SAN-1
+    # (ASan) is added in M9.
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
+    timeout-minutes: 115
     strategy:
       fail-fast: false
       matrix:
@@ -273,10 +274,13 @@ jobs:
           esac
       - name: Positive control (a dumpable crash is recorded)
         run: |
-          cp /bin/sleep "$RUNNER_TEMP/pwvctl"
+          # Our own binary, not a renamed system tool: on 26.04 coreutils is
+          # one multicall binary that refuses unknown names. It aborts
+          # itself (SIGABRT, a core-dumping signal), so there is no race.
+          printf 'fn main() { std::process::abort() }\n' > "$RUNNER_TEMP/pwvctl.rs"
+          rustc -o "$RUNNER_TEMP/pwvctl" "$RUNNER_TEMP/pwvctl.rs"
           ulimit -c unlimited
-          "$RUNNER_TEMP/pwvctl" 60 & pid=$!
-          sleep 1; kill -SEGV "$pid"; wait "$pid" || true
+          if "$RUNNER_TEMP/pwvctl"; then echo "control did not crash"; exit 1; fi
           for _ in $(seq 30); do
             coredumpctl --no-pager list pwvctl && exit 0
             sleep 1

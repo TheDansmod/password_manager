@@ -812,3 +812,27 @@ M5; the specification is unchanged until then.
   before the first commit, 4,899 after; 1,185 between `link` and rename,
   with a longest run of 5. That is exactly the length that broke saves
   before round 1's fix, so CI now exercises the regression case directly.
+
+## 2026-11-11 — CI round 4: first run on ubuntu-26.04
+
+- **coredump failed: the positive control broke on the new image.**
+  Ubuntu 26.04 ships uutils (Rust coreutils) as one multicall binary that
+  dispatches on `argv[0]`. The control copied `/bin/sleep` to `pwvctl`,
+  and the copy exited at once with "unknown program 'pwvctl'". The SIGSEGV
+  then hit no process. The control is now a one-line Rust program,
+  `std::process::abort()`, compiled by `rustc` in the job. It dumps core by
+  itself (SIGABRT), so it doesn't depend on the image's coreutils and has
+  no sleep/kill race. Checked locally: it exits 134 and dumps core. The
+  T-MEM-5 checks themselves did not change.
+- **LOC caps (spec Section 3, owner decision):** store 450 (as decided in
+  round 1; the spec row is now 450), vault 300 → 500, `term` + `clip` 350,
+  Total 3,000 → 3,200. `scripts/loc_budget.py` matches. Current usage:
+  store 409/450, vault 196/500, total 1,992/3,200.
+- **Runtimes on 26.04:** lint 5m22, test 25m49, compat 0m09, fuzz-smoke
+  2m50–3m03, sanitizers 15m35–37m48, durability 4m09, supply 6m50.
+  coredump took 3m29 but failed early. Under the 3× rule this sets lint
+  to 16, test to 80 and sanitizers to 115 minutes. Every other cap already
+  has at least 3× headroom.
+- **T-STORE-3 on 26.04 (seed 0xb90fbed75c1b5f5):** 174 kills before the
+  first commit, 4,826 after; 1,108 between `link` and rename, with a
+  longest run of 5, so the round-1 regression case was exercised again.
