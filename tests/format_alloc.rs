@@ -4,12 +4,16 @@
 //!
 //! A counting layer around the verifying zeroizing allocator (T-MEM-6)
 //! records the largest allocation made while armed. This crate holds a
-//! single `#[test]` so no other test thread allocates while armed. The
-//! store's read path (M4) is added to this test when it exists.
+//! single `#[test]` so no other test thread allocates while armed. M4 adds
+//! the store's read path: `Store::open` compares the header's claimed
+//! length with the file size before allocating the file buffer.
 
 use pwv::alloc::ZeroizingAlloc;
 use pwv::format::{Error, HEADER_LEN, Header, MAX_FILE, parse_header, split_file};
+use pwv::store::{self, Paths, Store};
 use std::alloc::{GlobalAlloc, Layout};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct Counting {
@@ -150,5 +154,59 @@ fn t_fmt_4_hostile_headers_rejected_before_large_allocation() {
         if let Ok(len) = claimed {
             assert!(len <= MAX_FILE && len != file.len(), "{what}");
         }
+    }
+
+    // M4: the store's read path, on files planted in a private directory.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("pwv");
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    let paths = Paths {
+        vault: dir.join("vault.pwv"),
+        state: tmp.path().join("state"),
+    };
+    let plant = |bytes: &[u8], len: u64| {
+        let _ = std::fs::remove_file(&paths.vault);
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true).mode(0o600);
+        let mut f = o.open(&paths.vault).unwrap();
+        f.write_all(bytes).unwrap();
+        f.set_len(len).unwrap(); // sparse beyond `bytes`
+    };
+    let gib = 1u64 << 30;
+    let store_cases: [(&str, [u8; HEADER_LEN + 16], u64, Error); 5] = [
+        // Header claims 4 KiB; the (sparse) file is 1 GiB.
+        (
+            "1 GiB file",
+            patched(180, &4096u32.to_le_bytes()),
+            gib,
+            Error::FileLength,
+        ),
+        // Header claims 16 MiB; the file is 200 bytes.
+        (
+            "16 MiB claimed",
+            patched(180, &(16u32 << 20).to_le_bytes()),
+            200,
+            Error::FileLength,
+        ),
+        (
+            "payload_len = u32::MAX",
+            patched(180, &u32::MAX.to_le_bytes()),
+            gib,
+            Error::PayloadLength,
+        ),
+        (
+            "kdf_m_kib = 2^32 - 1",
+            patched(32, &u32::MAX.to_le_bytes()),
+            gib,
+            Error::KdfMemory,
+        ),
+        // Shorter than a header.
+        ("100-byte file", patched(0, &[]), 100, Error::HeaderLength),
+    ];
+    for (what, file, len, want) in &store_cases {
+        plant(file, *len);
+        let (got, largest) = measured(|| Store::open(paths.clone(), false).err());
+        assert_eq!(got, Some(store::Error::Format(*want)), "store: {what}");
+        assert!(largest <= LIMIT, "store: {what}: allocated {largest} bytes");
     }
 }

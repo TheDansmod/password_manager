@@ -3,6 +3,10 @@
 # (Miri on format), testkdf test build. M3: crypto and lifecycle tests in
 # `test`, `compat` (golden vaults checked by an independent implementation),
 # T-FUZZ-3 in `fuzz-smoke`, Miri on crypto and vault in `sanitizers`.
+# M4: storage tests in `test` (T-STORE-1 .. T-STORE-7, T-STORE-9; T-STORE-2
+# is a lib unit test), a vfat loop mount for T-STORE-1's foreign-filesystem
+# refusal, and `durability` (T-STORE-3 at 5,000 iterations; LazyFS for
+# T-STORE-8 joins it in M9).
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -70,6 +74,11 @@ jobs:
     # M1 gate: T-MEM-1, T-MEM-2, T-MEM-3, T-MEM-5 (release), T-MEM-6, T-ENG-5.
     # M2 gate: T-FMT-1 .. T-FMT-4. M3 gate: T-KAT-1, T-KAT-2, T-CRY-1 ..
     # T-CRY-6, T-COMPAT-1 (tests/crypto.rs), T-MEM-7 (tests/kdf_region.rs).
+    # M4 gate (every configuration below): T-STORE-2 (fault injection, lib
+    # unit test in src/store.rs), T-STORE-1, -3 (500 kills), -4, -5, -6, -7,
+    # -9 (tests/store.rs), T-FMT-4 incl. the store read path
+    # (tests/format_alloc.rs). Vaults live under $TMPDIR (the runner's ext4
+    # root disk, so fsync is real); the source tree is never used.
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
@@ -86,6 +95,20 @@ jobs:
         run: cargo test --locked --features testkdf
       - name: Debug, memtest + testkdf (T-MEM-7 zero-before-munmap on a locked region)
         run: cargo test --locked --features memtest,testkdf
+      - name: T-STORE-1 on a real foreign filesystem (vfat loop mount)
+        # Refused without --allow-foreign-fs; with it, the full save protocol
+        # runs, including the copy fallback (vfat has no hard links). The
+        # mount reports our UID and 0700/0600, as the override requires.
+        run: |
+          command -v mkfs.vfat || { sudo apt-get update && sudo apt-get install -y dosfstools; }
+          truncate -s 64M "$RUNNER_TEMP/vfat.img"
+          mkfs.vfat "$RUNNER_TEMP/vfat.img"
+          sudo mkdir -p /mnt/pwv-vfat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)",umask=077 "$RUNNER_TEMP/vfat.img" /mnt/pwv-vfat
+          stat -f -c 'filesystem: %T (magic 0x%t)' /mnt/pwv-vfat
+          PWV_FOREIGN_DIR=/mnt/pwv-vfat cargo test --locked --test store \
+            -- --exact t_store_1_foreign_fs_real_mount 2>&1 | tee out.txt
+          grep -q "test result: ok. 1 passed" out.txt
 
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
@@ -186,6 +209,19 @@ jobs:
         run: >-
           cargo +nightly miri test --locked ${{ matrix.args }}
           -Zunstable-options --report-time
+
+  durability:
+    # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
+    # uniform 0-50 ms into the save loop), on every push and daily, against
+    # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: T-STORE-3 kill loop, 5,000 iterations (release)
+        env:
+          PWV_T_STORE_3_ITERATIONS: "5000"
+        run: cargo test --locked --release --test store -- --exact t_store_3_kill_loop
 
   coredump:
     # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner

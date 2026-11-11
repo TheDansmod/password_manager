@@ -21,7 +21,7 @@ import tempfile
 GROUPS = [
     ("sys + secmem + alloc", ["sys.rs", "secmem.rs", "alloc.rs"], 400, 800),
     ("crypto + format", ["crypto.rs", "format.rs"], 450, 750),
-    ("store", ["store.rs"], 250, 300),
+    ("store", ["store.rs"], 250, 450),
     ("vault", ["vault.rs"], 250, 300),
     ("gen", ["gen.rs"], 150, 200),
     ("term + clip", ["term.rs", "clip.rs"], 300, 350),

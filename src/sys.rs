@@ -4,15 +4,21 @@
 //! against rustix 1.1.6: `process::{setrlimit, getrlimit, umask,
 //! set_dumpable_behavior}`, `mm::{mmap_anonymous, mprotect, mlock, munlock,
 //! madvise, munmap}`, `mm::Advice::{LinuxDontDump, LinuxWipeOnFork}`,
-//! `termios::isatty`, `io::{read, write}`, `stdio::{stdin, stderr}`.
+//! `termios::isatty`, `io::{read, write}`, `stdio::{stdin, stderr}`; M4:
+//! `fs::{open, openat, fstat, statat, fstatfs, flock, fsync, renameat,
+//! linkat, unlinkat, Dir}`, `process::geteuid`.
 
 #![allow(unsafe_code)]
 
 use core::ptr::NonNull;
-use rustix::fd::BorrowedFd;
-use rustix::io::Errno;
+use rustix::fd::{BorrowedFd, OwnedFd};
+use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, OFlags};
+pub use rustix::io::Errno;
 use rustix::mm::{Advice, MprotectFlags};
 use rustix::process::{Resource, Rlimit};
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use zeroize::Zeroize;
 
 /// Failure of a hardening step or a memory syscall. Messages are fixed.
@@ -345,4 +351,171 @@ fn unmap(base: NonNull<u8>, total: usize) {
         // SAFETY: `base` was allocated by `map` with this exact layout.
         unsafe { std::alloc::dealloc(base.as_ptr(), layout) };
     }
+}
+
+// ---- Files (spec Section 8, for `store`). Every open adds `O_NOFOLLOW |
+// O_CLOEXEC`; names are single path components relative to a directory fd.
+
+/// What the open-time checks of Section 8.2 need from `fstat`/`lstat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileInfo {
+    /// A directory.
+    pub is_dir: bool,
+    /// A regular file.
+    pub is_file: bool,
+    /// Owner UID.
+    pub uid: u32,
+    /// Permission bits, `st_mode & 0o7777`.
+    pub perm: u32,
+    /// Size in bytes.
+    pub size: u64,
+}
+
+/// How [`open_at`] opens a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    /// Read only, `O_NONBLOCK` (an open of a planted FIFO cannot block).
+    Read,
+    /// Read only, created with mode 0600 if missing (lock files).
+    Lock,
+    /// `O_CREAT | O_EXCL | O_WRONLY`, mode 0600 (temporary files).
+    CreateNew,
+}
+
+/// The effective UID.
+#[must_use]
+pub fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// Opens the directory `path` (`O_DIRECTORY`; the last component must not
+/// be a symlink).
+///
+/// # Errors
+/// The `open(2)` error (`ELOOP`/`ENOTDIR` for a symlink or non-directory).
+pub fn open_dir(path: &Path) -> Result<OwnedFd, Errno> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(path, flags, Mode::empty())
+}
+
+/// Opens `name` in `dir` as `how` says.
+///
+/// # Errors
+/// The `openat(2)` error (`ELOOP` for a symlink).
+pub fn open_at(dir: BorrowedFd<'_>, name: &OsStr, how: OpenMode) -> Result<OwnedFd, Errno> {
+    let flags = match how {
+        OpenMode::Read => OFlags::RDONLY | OFlags::NONBLOCK,
+        OpenMode::Lock => OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CREATE,
+        OpenMode::CreateNew => OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+    };
+    let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::openat(dir, name, flags, Mode::RUSR | Mode::WUSR)
+}
+
+fn file_info(st: &rustix::fs::Stat) -> FileInfo {
+    let kind = FileType::from_raw_mode(st.st_mode);
+    FileInfo {
+        is_dir: kind == FileType::Directory,
+        is_file: kind == FileType::RegularFile,
+        uid: st.st_uid,
+        perm: st.st_mode & 0o7777,
+        size: u64::try_from(st.st_size).unwrap_or(u64::MAX),
+    }
+}
+
+/// `fstat(2)` of `fd`.
+///
+/// # Errors
+/// The `fstat(2)` error.
+pub fn info(fd: BorrowedFd<'_>) -> Result<FileInfo, Errno> {
+    Ok(file_info(&rustix::fs::fstat(fd)?))
+}
+
+/// `fstatat(2)` of `name` in `dir`, not following a symlink (`lstat`).
+///
+/// # Errors
+/// The `fstatat(2)` error (`ENOENT` if missing).
+pub fn info_at(dir: BorrowedFd<'_>, name: &OsStr) -> Result<FileInfo, Errno> {
+    Ok(file_info(&rustix::fs::statat(
+        dir,
+        name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?))
+}
+
+/// The filesystem magic number (`statfs.f_type`) of the filesystem holding
+/// `fd`. Magic numbers are 32-bit values.
+///
+/// # Errors
+/// The `fstatfs(2)` error.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "f_type is a signed long holding a 32-bit magic number"
+)]
+pub fn fs_magic(fd: BorrowedFd<'_>) -> Result<u32, Errno> {
+    Ok(rustix::fs::fstatfs(fd)?.f_type as u32)
+}
+
+/// `flock(LOCK_EX)`, blocking if `wait`, else `LOCK_NB` (`EWOULDBLOCK` if
+/// held). Retries on `EINTR`.
+///
+/// # Errors
+/// The `flock(2)` error.
+pub fn lock(fd: BorrowedFd<'_>, wait: bool) -> Result<(), Errno> {
+    let op = if wait {
+        FlockOperation::LockExclusive
+    } else {
+        FlockOperation::NonBlockingLockExclusive
+    };
+    loop {
+        match rustix::fs::flock(fd, op) {
+            Err(Errno::INTR) => {}
+            r => return r,
+        }
+    }
+}
+
+/// `fsync(2)`.
+///
+/// # Errors
+/// The `fsync(2)` error.
+pub fn fsync(fd: BorrowedFd<'_>) -> Result<(), Errno> {
+    rustix::fs::fsync(fd)
+}
+
+/// `renameat(2)` within `dir` (atomic replacement of `to`).
+///
+/// # Errors
+/// The `renameat(2)` error (`ENOENT` if `from` is missing).
+pub fn rename_at(dir: BorrowedFd<'_>, from: &OsStr, to: &OsStr) -> Result<(), Errno> {
+    rustix::fs::renameat(dir, from, dir, to)
+}
+
+/// `linkat(2)` within `dir`, not following a symlink at `from`.
+///
+/// # Errors
+/// The `linkat(2)` error (`EPERM`/`EOPNOTSUPP` where unsupported).
+pub fn link_at(dir: BorrowedFd<'_>, from: &OsStr, to: &OsStr) -> Result<(), Errno> {
+    rustix::fs::linkat(dir, from, dir, to, AtFlags::empty())
+}
+
+/// `unlinkat(2)` of a non-directory `name` in `dir`.
+///
+/// # Errors
+/// The `unlinkat(2)` error.
+pub fn unlink_at(dir: BorrowedFd<'_>, name: &OsStr) -> Result<(), Errno> {
+    rustix::fs::unlinkat(dir, name, AtFlags::empty())
+}
+
+/// The names in `dir` (including `.` and `..`).
+///
+/// # Errors
+/// The `getdents(2)` error.
+pub fn list_dir(dir: BorrowedFd<'_>) -> Result<Vec<OsString>, Errno> {
+    let mut names = Vec::new();
+    for entry in rustix::fs::Dir::read_from(dir)? {
+        names.push(OsStr::from_bytes(entry?.file_name().to_bytes()).to_owned());
+    }
+    Ok(names)
 }

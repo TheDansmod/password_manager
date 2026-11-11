@@ -555,3 +555,156 @@ the per-constraint error enum that T-FMT-2 and Section 12.2 require, leaving
   lifecycle). M5's model operations must fit the remaining 104 lines of
   `vault`'s cap (target 250); a decision may be needed then.
 
+
+## 2026-11-11 — M3 gate green on CI
+
+All jobs passed on the first M3 push. Miri job durations (parallel):
+`crypto-vault` 37m 39s, `format-testkdf` 33m 02s, `format-10000-entries`
+15m 41s, `format` 11m 41s — all far inside the 6 h job limit (the
+`sanitizers` job timeout is 350 min), so no test was reduced for time.
+Owner decision: LOC caps (notably `vault` 196 / 300) are revisited before
+M5; the specification is unchanged until then.
+
+## 2026-11-11 — M4: storage
+
+- **API.** `store::Paths::resolve(flag, env)` (Section 8.1);
+  `Store::open(paths, allow_foreign_fs) -> (Store, file bytes)`;
+  `Store::create(paths, allow_foreign_fs)` for `init` (the first
+  `save` writes the file); `Store::save(file)`; `Store::freshness(header)`
+  (Section 8.4). The session `flock` lives as long as the `Store`. `cli`
+  gains `store_exit_code`, `rollback_warning`, and `confirm_rollback`: the
+  logic of the Section 8.4 prompt, which M7 wires to the terminal.
+- **Paths.** XDG values that are empty or relative are ignored (XDG Base
+  Directory specification), and so is a relative `HOME`. An empty
+  `--vault` or `PWV_VAULT` is an error (`Error::Path`, exit 4), never a
+  silent fallback to another vault. The state path needs `HOME` or
+  `XDG_STATE_HOME` even with `--vault`. Names beside the vault:
+  `<name>.lock`, `<name>.1` … `.5`, temporaries `.<name>.tmp.<16 hex>`.
+  The backup copy (fallback) also uses the vault's temporary name, so the
+  open-time cleanup covers it; T-STORE-2 found this. The state directory
+  holds `state`, `state.lock`, `.state.tmp.<16 hex>`.
+- **Open-time checks (8.2), as implemented.** (a) Open the directory with
+  `O_DIRECTORY | O_NOFOLLOW` (= "lstat, must be a directory, no symlink",
+  without a race). (b) **`statfs` first**, then the directory's owner and
+  mode. This is a deviation in order only: on a foreign filesystem, owner
+  and mode are synthetic (ntfs-3g reports `nobody`, 0777, as this
+  sandbox's `/workspace` does), so checking them first gave a misleading
+  "wrong owner" instead of the S8 refusal. (c) `lstat` of the vault (a
+  regular file, owner, mode) **before** the lock file is created, so open
+  never creates anything when the vault is missing (B1). (d) The lock
+  file: `O_NOFOLLOW`, created 0600, owner/type/mode checked (stricter than
+  the spec), `flock(LOCK_EX | LOCK_NB)`. (e) Stale-temp cleanup. (f) The
+  vault is opened again **after** the lock (`O_NOFOLLOW | O_NONBLOCK`, so a
+  planted FIFO cannot block), `fstat`-checked, the 184-byte header parsed,
+  and its claimed length compared with the file size **before** the
+  buffer is allocated (Section 7.1). Reading before the lock could return
+  the inode a concurrent session was replacing.
+- **`--allow-foreign-fs` waives only the `statfs` check.** Owner and mode
+  are still enforced, so a default ntfs-3g mount (0777, `nobody`) stays
+  refused even with the flag. It opens only if the mount reports our UID
+  and private modes (for example `uid=`, `umask=077`). Fail closed. The
+  state directory gets the same checks and the same flag.
+- **Foreign magic numbers.** `statfs` reports one magic number for every
+  FUSE mount, so `fuseblk` cannot be told apart from sshfs or gocryptfs
+  without parsing `/proc/self/mountinfo`. All FUSE mounts are refused (the
+  conservative choice); the flag overrides. The legacy in-kernel `ntfs`
+  driver (0x5346544e) is refused along with `ntfs3`. **Open question for
+  the owner:** WSL2 exposes Windows drives through 9p (`drvfs`,
+  0x01021997) or virtiofs, and neither is in Section 8.2's list. Since
+  that list says "namely", they are not refused.
+- **Rollback check after authentication.** `freshness` takes the header
+  returned by `vault::unlock`, never the unauthenticated bytes, so M7
+  runs unlock → `freshness` → prompt. `confirm_rollback` accepts exactly
+  `yes`; `term` (M7) strips the line ending first. On `yes`, the header's
+  generation is raised to g_s, so the next save writes max(g_f, g_s) + 1.
+- **State file.** One line `<32 lowercase hex> <decimal>\n` per vault,
+  parsed strictly: no sign, no CR, no missing final newline, no duplicate
+  IDs, cap 1 MiB. A malformed file is `Error::State` (exit 3): refusing is
+  the conservative option, because ignoring it would silently disable G3.
+  The user can inspect or delete it. Writes never lower a recorded value
+  (`max`), and they happen under `state.lock`, because sessions on
+  *different* vaults may save at the same time and a read-modify-write
+  would lose one record.
+- **Save.** `split_file` first, so a malformed file is refused before
+  anything on disk changes. Hard links that are unsupported (`EPERM`,
+  `EOPNOTSUPP`, `ENOSYS`) fall back to copying via the same atomic
+  write. On an I/O error after the temporary file exists, it is unlinked.
+  The backups were already rotated, as in the crash table's
+  "steps 1–2" row (`failed_save_leaves_vault_state_and_no_temp_file`,
+  which uses `RLIMIT_FSIZE` to cause `EFBIG`). **Known edge for M7:** if
+  the directory `fsync` fails *after* the rename, `save` returns `Io`
+  although the new file is in place. Section 8.5's "a failed command
+  leaves disk unchanged" cannot hold there. M7 should treat any save error
+  as fatal for the session (wipe, exit 4) rather than keep a model that
+  may disagree with the disk.
+- **Exit codes.** `NoVault` and `Exists`: 1. `Format` and `State`: 3.
+  `Path`, `Kind`, `Owner`, `Mode`, `ForeignFs`, `InUse`, `Io`: 4.
+- **Fault hook (T-STORE-2).** A `#[cfg(test)]` boxed closure, not a
+  trait; rule 7 allows one but none is needed. It is called at 17 points
+  of a save (23 with the copy fallback): 4 renames, link, then 6 points
+  each for the temporary-file write of the vault and of the state (plus 6
+  for the copy fallback). A
+  crash is a panic in the hook: unwinding only closes fds, so no
+  error-path cleanup runs, exactly as when the process dies. The page
+  cache survives, as with SIGKILL; power loss is T-STORE-8 (M9). Since a
+  unit test in `store` may not use `vault` (same layer), T-STORE-2
+  asserts **byte identity** with the old or the new file, which is
+  stronger than model equality. It also checks the exact old/new boundary
+  (the vault rename), the recorded state generation (the state rename),
+  freshness, backups, temp cleanup, and that the next save recovers. Runs
+  from 1, 2, and 7 prior saves, with and without the link fallback.
+- **T-STORE-1 owner.** The test-only UID override is the private
+  `Store::open_as(.., euid)` plus unit tests of `check()` for each object.
+  The integration test also uses a real root-owned directory (`/`).
+  `t_store_1_foreign_fs_real_mount` runs when `PWV_FOREIGN_DIR` is set.
+  CI sets it to a vfat loop mount, which also exercises the copy fallback
+  on a filesystem without hard links. Locally the refusal half passed on
+  a `fuseblk` mount.
+- **T-STORE-3.** Children receive the KEK through the environment (test
+  only), so they start saving within milliseconds instead of spending the
+  0–50 ms window in Argon2. The delay is measured from the child's
+  `PWV ready` report. Checks per kill: SIGKILL was the cause of death;
+  reports are consecutive; the vault opens and its generation is the last
+  reported commit or one more (killed between rename and report); its
+  content matches its generation; it is fresh; every backup decrypts to
+  its own generation's model; no temporary file survives the open. The
+  seed is random and printed in every failure (`PWV_T_STORE_3_SEED`
+  replays it); `PWV_T_STORE_3_ITERATIONS` ≥ 500. Local run (tmpfs): 500
+  kills, 2,897 commits, 40 kills before the first commit, ~30 s. The CI
+  job `durability` runs 5,000 iterations on ext4, on every push.
+- **T-STORE-4.** The second process (a re-run of the test binary) measures
+  ~3 ms spawn-to-exit locally against the 100 ms bound, even while the
+  kill loop runs in parallel. The message contains both "in use"
+  (T-STORE-4) and "open in another session" (Section 8.2). The lock is
+  released on a clean exit and on SIGKILL.
+- **T-STORE-9 at M4** is store-level: three open → decrypt → freshness →
+  close sessions leave inode, mtime, ctime, size, and link count unchanged
+  for every file and both directories, with a positive control (a save
+  changes them). M7 repeats it with the read-only commands.
+- **T-FMT-4** now includes `Store::open` on planted files (1 GiB sparse
+  file, 16 MiB claimed for 200 bytes, hostile `payload_len`/`kdf_m_kib`,
+  short file): each refused, largest allocation ≤ 64 KiB.
+- **Test harness: fork vs. `flock`.** The first full local run was flaky
+  (4 of 6 memtest runs; `InUse` on a reopen). Cause: `tests/store.rs`
+  spawns children (T-STORE-3, T-STORE-4, the `RLIMIT_FSIZE` test, `sh`
+  for the remedies) from other test threads. Between `fork` and `exec` a
+  child holds copies of every fd, including another test's lock fd, so a
+  just-closed session's `flock` briefly stays held. The `pwv` binary
+  never forks (Section 5.7), so production is unaffected. Fix, in the
+  test crate only: a `RwLock` that spawns hold for writing and asserted
+  opens/creates hold for reading (`Command::spawn`/`output` return after
+  `exec`). No retry, and no assertion was loosened. Afterwards 10 of 10
+  memtest runs passed, plus all five configurations.
+- **Hand mutation check** (not T-MUT-1): 18 mutants of `store`; 16
+  killed (the temp-unlink mutant survived at first and is now killed by
+  the `RLIMIT_FSIZE` test). Survivors: removing the temp-file `fsync` and the directory
+  `fsync`, which only power loss can reveal (T-STORE-8, LazyFS, M9).
+- **LOC.** `store` is 400 (target 250). **Owner decision (2026-11-11):**
+  the `store` hard cap is raised to **450**; the owner edits the Section 3
+  table and `scripts/loc_budget.py` matches. Justification: the error
+  enum (~60 lines, with the exact `chmod` remedy), XDG resolution (~28),
+  open-time checks for directory, vault, and lock with
+  header-before-allocation (~110), rotation, copy fallback, and atomic
+  write (~70), and the locked state file (~80). A simplification pass
+  went from 413 to 400; reaching 300 would mean deleting required
+  behaviour. `sys` gained the file wrappers (613 / 800 for the group).

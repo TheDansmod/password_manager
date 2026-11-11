@@ -23,6 +23,40 @@ pub fn run_child(test_name: &str, env: &[(&str, &str)]) -> Output {
     cmd.output().expect("spawn child test")
 }
 
+/// A `Command` that re-runs this test binary, executing only `test_name`
+/// (quietly, single-threaded), with `env` set. Unlike [`run_child`] it is
+/// not started, so the caller can pipe its streams and signal it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests spawn children; Section 5.7 binds the binary only"
+)]
+pub fn child_command(test_name: &str, env: &[(&str, &str)]) -> Command {
+    let exe = std::env::current_exe().expect("current_exe");
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "--exact",
+        test_name,
+        "--nocapture",
+        "--test-threads=1",
+        "-q",
+    ]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// `sh -c <script>`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests spawn children; Section 5.7 binds the binary only"
+)]
+pub fn shell_command(script: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", script]);
+    cmd
+}
+
 /// `std::process::Command` for the `pwv` binary built alongside the tests.
 #[allow(
     clippy::disallowed_methods,
