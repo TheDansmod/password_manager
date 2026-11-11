@@ -760,3 +760,33 @@ M5; the specification is unchanged until then.
   every T-STORE test in the log and fails if any one did not run. T-STORE-4
   was already running inside each `cargo test` step, but no step name
   showed it.
+
+## 2026-11-11 — M4 CI round 2: M4 gate green on CI
+
+- **CI result.** Every job green, including `durability` (5,000 kills in
+  161 s) and the new "M4 gate by name" step, which listed all 14 gate
+  tests. The owner added 9p to Section 8.2's list.
+- **CI maintenance.**
+  - `actions/checkout@v4` → `@v5` (Node 24 runtime, removing GitHub's
+    Node 20 deprecation warning). `actions/upload-artifact@v4` → `@v6`
+    for the same reason. A missing tag would fail at "Set up job", so the
+    next run verifies both.
+  - Runners are pinned to `ubuntu-24.04`. `ubuntu-latest` moves to 26.04
+    from 2026-10-19, and during that migration jobs could land on either
+    image. Spec 15.3 names `ubuntu-latest` only as an example. Moving to
+    26.04 will be a separate change with a full run.
+  - Every job has a `timeout-minutes`: 120, or 350 for Miri. A stall
+    therefore fails within 2 h instead of 6 h. `durability` went from
+    350 to 120 minutes, more than 10 times its measured runtime.
+- **T-STORE-3 statistics.** The loop now prints its seed and its counts on
+  every run (`--nocapture` in `durability`): kills before the first
+  commit, kills after commits, kills between `link` and rename, the
+  longest run of those, and the final generation. These are information
+  only. A "kills in the link window" assertion would be flaky: this
+  sandbox saw only 1–6 of 500 in debug.
+- **Known local-only flake, test unchanged.** The non-vacuity guard
+  `none > 0` needs a kill before the child's first commit. In release on
+  tmpfs a save takes about 0.1 ms, so a uniform 0–50 ms delay misses it in
+  roughly a third of runs (2 of 6 in this sandbox). It holds on CI's
+  ext4, where the first save includes real `fsync`s. Rule 2 forbids
+  weakening the guard, so it stays; the owner may decide otherwise.

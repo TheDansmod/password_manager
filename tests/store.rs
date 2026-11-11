@@ -617,6 +617,10 @@ fn t_store_3_kill_loop() {
     env.push(("PWV_T_KEK".into(), vaults::hex(&kek)));
     let mut rng = Rng(seed);
     let (mut gen_now, mut none, mut some) = (1u64, 0usize, 0usize);
+    // Kills between step 2's link and step 4's rename leave `.1` linked to
+    // the vault; five in a row once made every later save fail (DESIGN_NOTES,
+    // M4 CI round 1). Counted so the log shows that window was exercised.
+    let (mut window, mut run, mut longest) = (0usize, 0usize, 0usize);
     for it in 0..iterations {
         let delay = Duration::from_micros(rng.next() % 50_001);
         let ctx = format!("iteration {it}, seed {seed:#x}, delay {delay:?}");
@@ -656,7 +660,23 @@ fn t_store_3_kill_loop() {
         }
         let committed = gens.last().copied().unwrap_or(gen_now);
         gen_now = verify_after_kill(&f, &kek, committed, &ctx);
+        let ino = |n: &str| fs::metadata(f.at(n)).map(|m| m.ino()).ok();
+        if ino("vault.pwv.1").is_some() && ino("vault.pwv.1") == ino("vault.pwv") {
+            window += 1;
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
     }
+    pwv::sys::write_stderr(
+        format!(
+            "T-STORE-3: seed {seed:#x}, {iterations} kills: {none} before the first \
+             commit, {some} after commits; {window} between link and rename \
+             (longest run {longest}); final generation {gen_now}\n"
+        )
+        .as_bytes(),
+    );
     // Not vacuous: kills landed both before the first commit and after
     // commits (the remaining kills land inside saves).
     assert!(none > 0 && some > 0, "seed {seed:#x}: {none} / {some}");

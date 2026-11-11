@@ -11,6 +11,10 @@
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
 # mutants, durability, and release jobs.
+# Runners are pinned to ubuntu-24.04 (ubuntu-latest moves to 26.04 from
+# 2026-10-19; a mixed fleet would make results incomparable). Moving to
+# 26.04 is a separate, deliberate change. Every job has a timeout well
+# above its normal runtime so that a stall fails fast.
 name: ci
 
 on:
@@ -35,9 +39,10 @@ env:
 jobs:
   lint:
     # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: T-ENG-1 rustfmt
@@ -82,9 +87,10 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
         run: cargo test --locked
       - name: Debug, memtest (T-MEM-2, T-MEM-3)
@@ -130,9 +136,10 @@ jobs:
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
     # models with argon2-cffi + PyNaCl (libsodium), sharing no code with pwv.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install reference implementations
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
@@ -156,7 +163,8 @@ jobs:
     # target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     env:
       # ASan's quarantine keeps freed blocks resident (256 MiB by default on
       # x86_64), and libFuzzer's -rss_limit_mb counts them, so a target that
@@ -172,7 +180,7 @@ jobs:
           - { target: fuzz_body, features: "" }
           - { target: fuzz_open, features: "--features testkdf" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install nightly and cargo-fuzz
         run: |
           rustup toolchain install nightly --profile minimal
@@ -186,7 +194,7 @@ jobs:
             -timeout=1 -max_len=24576
       - name: Upload crash artefacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts
@@ -196,7 +204,7 @@ jobs:
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
     # nightly. One job per suite, in parallel, each with the 6 h job limit;
     # --report-time names any slow test. T-SAN-1 (ASan) is added in M9.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -217,7 +225,7 @@ jobs:
               t_cry_2_ t_cry_4_ t_cry_6_ unlock_rejects_
     name: sanitizers (${{ matrix.name }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install nightly with Miri
         run: |
           rustup toolchain install nightly --profile minimal --component miri
@@ -231,14 +239,14 @@ jobs:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), on every push and daily, against
     # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)
         env:
           PWV_T_STORE_3_ITERATIONS: "5000"
-        run: cargo test --locked --release --test store -- --exact t_store_3_kill_loop
+        run: cargo test --locked --release --test store -- --exact t_store_3_kill_loop --nocapture
 
   coredump:
     # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner
@@ -246,9 +254,10 @@ jobs:
     # systemd-coredump as the piped core_pattern. A positive control first
     # proves that a crash of a dumpable process does produce an entry here,
     # so the negative check is not vacuous.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install systemd-coredump; set suid_dumpable = 0
         run: |
           sudo systemctl disable --now apport.service 2>/dev/null || true
@@ -289,9 +298,10 @@ jobs:
 
   supply:
     # T-SUPPLY-1.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install cargo-deny and cargo-audit
         run: |
           cargo install --locked cargo-deny --version "$CARGO_DENY_VERSION"
