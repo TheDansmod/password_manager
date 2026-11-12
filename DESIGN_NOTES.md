@@ -997,3 +997,85 @@ M5; the specification is unchanged until then.
   Possible harness fix, which loosens no assertion: keep the write lock
   after `spawn` until `/proc/<pid>/fd` no longer lists a lock file.
   Awaiting the owner's decision.
+
+## 2026-11-12 — M5 CI round 1: Miri cost, store-harness flake, caps
+
+**Results.** Every job passed except `sanitizers (vault-model)`, which hit
+its 115 min cap: 12 of 15 tests finished (their `--report-time` times sum
+to 62 min); T-VAULT-1 and both T-VAULT-2 tests never finished. Times:
+`test` 1h02m17 (M5 gate-by-name step 36 s), `lint` 5m29, `compat` 10 s,
+`fuzz-smoke` 2m21–2m56 (`fuzz_import` 2m50), `sanitizers` format 13m03,
+format-10000-entries 9m06, format-testkdf 24m15, crypto-vault 37m43,
+`durability` 3m58, `coredump` 1m54, `supply` 9m13.
+
+**Where Miri spent the time.** These figures are inferred from the
+per-test times; Miri cannot run in the sandbox. A test that only builds
+and drops a 256 KiB Miri arena took about 130 s. The drop wipes the region
+byte by byte, then `ZeroizingAlloc` wipes and scans it again (about
+768 K volatile byte steps). Each operation added about 30 s, because every
+rewrite exposed the whole scratch half (126 KiB) and then wiped all of it
+past the new body. So Miri pays about 0.2 ms per volatile byte, and each
+operation's cost was set by the slot size, not by the body. Two changes
+follow; no test was reduced.
+
+- **`vault`: wipe what was used.** A rewrite exposes only
+  `min(slot, live.len() + 2 × BLOCK)`. One operation adds at most
+  4 + 64 + 4096 content bytes (`set`), and `live.len()` is at least
+  12 + content, so the new padded body always fits. The exposed part is
+  shorter than the slot only when the body fits anyway, so `Capacity`
+  occurs exactly as before.
+  `import` exposes `min(slot, live.len() + 5 × len + BLOCK)`. The merge
+  adds at most the import's content plus 11 bytes per imported entry, and
+  every entry is at least 5 bytes, so that is under `4 × len`. The
+  single-slot rule (merged + import ≤ slot) is unchanged.
+  The wipe after an operation now covers about body + 8 KiB instead of
+  half the arena, which also helps native runs with large arenas.
+  T-VAULT-1, `capacity_is_a_clean_error`, `import_capacity_rule`, and
+  `fuzz_import` (273,793 runs locally) confirm the error behaviour is
+  unchanged. `vault` stays at 486/500.
+- **`sys`, Miri backend only.** The region is allocated from `System`, as
+  `mmap` is natively, not through the global `ZeroizingAlloc`. The
+  region's own zeroize-on-drop (T-MEM-3) still runs; only the second wipe
+  and scan of already-zero memory are gone.
+- **Three Miri jobs.** `vault-model` (the 12 unit tests),
+  `vault-model-t-vault-1`, and `vault-model-t-vault-2` run the same tests
+  as before with the same arguments, in parallel. `timeout-minutes` is now
+  per matrix entry. The three vault caps are **180 min, provisional**:
+  there is no measurement since the change, and the estimate is about
+  15–45 min each. Set them to 3× the next measurement.
+
+**Caps reset from the round 1 times (3×, floor 10):** `lint` 16 → 17,
+`test` 150 → 190, `compat` 10, `fuzz-smoke` 15 → 10, `sanitizers` format
+40, format-10000-entries 28, format-testkdf 73, crypto-vault 115,
+`durability` 20 → 12, `coredump` 20 → 10, `supply` 25 → 28 (9m13 was
+over a third of 25).
+
+**Store harness: fork vs. `flock`, fixed (owner decision 2026-11-12).**
+This is the `InUse` flake reported in the M5 entry. `Command::spawn`
+returns before the child's close-on-exec has run, so the M4 `FORK` lock
+did not cover the window in which a child still held a copy of another
+test's lock fd. `SpawnLocked::spawn_locked` now works as follows:
+
+1. Under the write lock, it adds a `pre_exec` hook.
+2. In the child, the hook `fstat`s fds 3 to the parent's highest fd and
+   closes the regular files and directories. Every fd is close-on-exec,
+   so `exec` would close them anyway. Pipes and devices are kept, which
+   covers the signal pipe and `Command`'s own pipes.
+3. The hook then writes one byte to a pipe.
+4. The parent reads that byte before releasing the lock. Once the child's
+   `close` calls have returned, the kernel has dropped its references and
+   any `flock` they kept alive.
+
+`output` already waits for the child to exit, and exit closes every fd
+before `wait` returns. No assertion changed, and no retry was added.
+The first version listed the parent's file fds *before* creating the
+signal pipe. The listing's directory fd could then be reused for the
+pipe's write end, which the child closed, so `spawn` failed (1 run in 16).
+Classifying fds in the child removes that race. Local runs after the fix:
+24 of 24 clean runs of `tests/store` (16
+`testkdf`, 8 `memtest`), plus 28 earlier runs during development, with no
+`InUse`. Before the fix it failed in 3 of 12. Full local matrix after all round-2 changes, all green:
+default 518 s, memtest 628 s, release 75 s, testkdf 495 s,
+memtest+testkdf 550 s. Two kill-loop failures in one development batch
+were `ENOSPC`: build directories had filled the 512 MiB `/tmp` tmpfs,
+not a test fault.

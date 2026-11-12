@@ -338,18 +338,24 @@ fn unmap(base: NonNull<u8>, total: usize) {
     let _ = unsafe { rustix::mm::munmap(base.as_ptr().cast(), total) };
 }
 
+// Under Miri the region comes from `System`, not the global allocator: like
+// `mmap`, it bypasses `ZeroizingAlloc`, whose second wipe and scan of an
+// already zeroized region would only cost interpretation time.
 #[cfg(miri)]
 fn map(total: usize) -> Result<NonNull<u8>, Error> {
+    use std::alloc::GlobalAlloc;
     let layout = std::alloc::Layout::from_size_align(total, 4096).map_err(|_| Error::Map)?;
     // SAFETY: `layout` has non-zero size.
-    NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) }).ok_or(Error::Map)
+    NonNull::new(unsafe { std::alloc::System.alloc_zeroed(layout) }).ok_or(Error::Map)
 }
 
 #[cfg(miri)]
 fn unmap(base: NonNull<u8>, total: usize) {
+    use std::alloc::GlobalAlloc;
     if let Ok(layout) = std::alloc::Layout::from_size_align(total, 4096) {
-        // SAFETY: `base` was allocated by `map` with this exact layout.
-        unsafe { std::alloc::dealloc(base.as_ptr(), layout) };
+        // SAFETY: `base` was allocated by `map` from `System` with this
+        // exact layout.
+        unsafe { std::alloc::System.dealloc(base.as_ptr(), layout) };
     }
 }
 

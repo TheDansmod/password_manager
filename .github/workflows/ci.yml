@@ -17,7 +17,8 @@
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
-# fails fast; raise a cap only together with a measured runtime.
+# fails fast; raise a cap only together with a measured runtime. Caps were
+# last reset from the M5 CI round 1 timings (DESIGN_NOTES, M5 CI round 1).
 name: ci
 
 on:
@@ -42,8 +43,9 @@ env:
 jobs:
   lint:
     # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
+    # Measured 5m29 (M5 round 1).
     runs-on: ubuntu-26.04
-    timeout-minutes: 16
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
@@ -91,11 +93,10 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
-    # Timeout: M4 measured 25m49 on 26.04; M5 adds about 5.5 min per debug
-    # configuration locally (T-VAULT-1), so about 50 min is expected; 150 is
-    # provisional until the CI measurement is recorded (DESIGN_NOTES, M5).
+    # Measured 1h02m17 (M5 round 1; M4 was 25m49): T-VAULT-1 runs in all
+    # five configurations.
     runs-on: ubuntu-26.04
-    timeout-minutes: 150
+    timeout-minutes: 190
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
@@ -157,6 +158,7 @@ jobs:
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
     # models with argon2-cffi + PyNaCl (libsodium), sharing no code with pwv.
+    # Measured 10 s (M5 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -184,8 +186,9 @@ jobs:
     # (M5, import merge): 60 s per target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
+    # Slowest target measured 2m56 (M5 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     env:
       # ASan's quarantine keeps freed blocks resident (256 MiB by default on
       # x86_64), and libFuzzer's -rss_limit_mb counts them, so a target that
@@ -224,38 +227,58 @@ jobs:
   sanitizers:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
-    # nightly. One job per suite, in parallel (slowest 37.8 min on
-    # ubuntu-26.04, cap 115); --report-time names any slow test. T-SAN-1
-    # (ASan) is added in M9.
+    # nightly. One job per suite, in parallel, each with its own cap (3x its
+    # M5 round 1 time); --report-time names any slow test. T-SAN-1 (ASan)
+    # is added in M9.
     runs-on: ubuntu-26.04
-    timeout-minutes: 115
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: format
+          - name: format # measured 13m03
+            timeout: 40
             args: "--no-default-features --test format -- --skip t_fmt_2_entry_count"
-          - name: format-10000-entries
+          - name: format-10000-entries # measured 9m06
+            timeout: 28
             args: "--no-default-features --test format -- --exact t_fmt_2_entry_count_0_max_max_plus_1"
-          - name: format-testkdf
+          - name: format-testkdf # measured 24m15
+            timeout: 73
             args: "--no-default-features --features testkdf --test format --"
           # Native runs cover the heavy sweeps (T-CRY-1, -3, -5), the 6 MiB
           # capacity case, file I/O, and child processes (Miri isolation).
-          - name: crypto-vault
+          - name: crypto-vault # measured 37m43
+            timeout: 115
             args: >-
               --no-default-features --features testkdf --test crypto --
               t_kat_ normalize_ kdf_write_policy ct_eq_and_wrap lifecycle_
               t_cry_2_ t_cry_4_ t_cry_6_ unlock_rejects_
-          # M5 model. T-VAULT-1 runs 2 cases without the ~120 KiB prefill
-          # and without file I/O (save and reopen go through the sealed file
-          # in memory). The 10,000-entry, capacity, and every-offset
-          # truncation sweeps run natively only.
+          # M5 model, in three jobs. T-VAULT-1 runs 2 cases without the
+          # ~120 KiB prefill and without file I/O (save and reopen go through
+          # the sealed file in memory). The 10,000-entry, capacity, and
+          # every-offset truncation sweeps run natively only.
+          # Round 1 ran all of these in one job and hit its 115 min cap after
+          # the 12 unit tests (62 min); T-VAULT-1/-2 never finished. Each op
+          # then wiped the whole 126 KiB scratch half byte by byte; it now
+          # wipes about body + 8 KiB. Caps are provisional (no measurement
+          # since that change; DESIGN_NOTES, M5 CI round 1).
           - name: vault-model
+            timeout: 180
             args: >-
               --no-default-features --features testkdf --test vault --
-              t_vault_ new_ set_replaces renames_to_self mv_reorders
+              new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
+          - name: vault-model-t-vault-1
+            timeout: 180
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-2
+            timeout: 180
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              t_vault_2_
     name: sanitizers (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5
@@ -272,8 +295,9 @@ jobs:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), on every push and daily, against
     # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
+    # Measured 3m58 (M5 round 1).
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)
@@ -287,8 +311,9 @@ jobs:
     # systemd-coredump as the piped core_pattern. A positive control first
     # proves that a crash of a dumpable process does produce an entry here,
     # so the negative check is not vacuous.
+    # Measured 1m54 (M5 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - name: Install systemd-coredump; set suid_dumpable = 0
@@ -333,9 +358,9 @@ jobs:
           coredumpctl --no-pager list || true
 
   supply:
-    # T-SUPPLY-1.
+    # T-SUPPLY-1. Measured 9m13 (M5 round 1; it builds both tools).
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    timeout-minutes: 28
     steps:
       - uses: actions/checkout@v5
       - name: Install cargo-deny and cargo-audit

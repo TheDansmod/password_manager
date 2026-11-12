@@ -337,10 +337,12 @@ fn field(items: &[Item<'_>], name: &[u8], key: &[u8]) -> Result<(usize, Option<u
     Ok((i, f))
 }
 
-/// The whole scratch slot, for writing.
-fn full<'s>(scratch: &'s mut SecretSlot<'_>) -> Result<&'s mut [u8], Error> {
+/// The first `n` bytes of the (empty) scratch slot, or all of it, for
+/// writing. Callers pass a bound on what they can write, so the wipe after
+/// an operation scales with the body, not with the slot.
+fn room<'s>(scratch: &'s mut SecretSlot<'_>, n: usize) -> Result<&'s mut [u8], Error> {
     scratch
-        .set_len(scratch.capacity())
+        .set_len(n.min(scratch.capacity()))
         .map_err(|_| Error::Capacity)?;
     Ok(scratch.expose_mut())
 }
@@ -349,13 +351,17 @@ fn full<'s>(scratch: &'s mut SecretSlot<'_>) -> Result<&'s mut [u8], Error> {
 /// and names the entry and field change to apply, or refuses.
 type Plan<'p, 'b> = &'p mut dyn FnMut(&mut Vec<Item<'b>>) -> Result<(usize, Edit<'b>), Error>;
 
-/// Rewrites `live` into `scratch` according to `plan`.
+/// Rewrites `live` into `scratch` according to `plan`. One operation adds
+/// at most 4 + 64 + 4096 content bytes (`set`), less than a block, and
+/// `live.len()` is at least 12 + its content, so the new padded length is
+/// below `live.len() + 2 * BLOCK`: `out` is shorter only when it is the
+/// whole slot, and `Capacity` is unchanged.
 fn rewrite<'b>(
     live: &'b [u8],
     scratch: &mut SecretSlot<'_>,
     plan: Plan<'_, 'b>,
 ) -> Result<usize, Error> {
-    let out = full(scratch)?;
+    let out = room(scratch, live.len() + 2 * format::BLOCK)?;
     let mut it = items(live)?;
     let (at, edit) = plan(&mut it)?;
     emit(out, &it, at, &edit)
@@ -413,7 +419,7 @@ impl<'a> Model<'a> {
             index: Vec::new(),
         };
         if m.live.is_empty() {
-            let r = emit(full(&mut m.scratch)?, &[], 0, &Edit::None);
+            let r = emit(room(&mut m.scratch, format::BLOCK)?, &[], 0, &Edit::None);
             m.adopt(r)?;
         } else {
             m.reindex()?;
@@ -618,10 +624,12 @@ impl<'a> Model<'a> {
     fn merge(&mut self, suffix: bool, n: &mut usize) -> Result<usize, Error> {
         let len = self.scratch.len();
         format::parse_body(self.scratch.expose()).map_err(Error::Invalid)?;
-        let cap = self.scratch.capacity();
-        let buf = full(&mut self.scratch)?;
-        buf.copy_within(..len, cap - len);
-        let (out, top) = buf.split_at_mut(cap - len);
+        // The merge adds at most the import's content (< len) and a suffix
+        // (11 bytes) per imported entry (each at least 5 bytes): < 4 * len.
+        let buf = room(&mut self.scratch, self.live.len() + 5 * len + format::BLOCK)?;
+        let at = buf.len() - len;
+        buf.copy_within(..len, at);
+        let (out, top) = buf.split_at_mut(at);
         out.fill(0);
         let mut it = items(self.live.expose())?;
         let live = it.len();

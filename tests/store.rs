@@ -21,8 +21,9 @@ use pwv::vault;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{PoisonError, RwLock, mpsc};
@@ -39,10 +40,14 @@ const PW: &str = "correct horse battery staple";
 /// Serialises child-process spawns (write) against opens and creates whose
 /// outcome a test asserts (read). Between `fork` and `exec` a child holds
 /// a copy of every fd of this multi-threaded test process, including
-/// another test's lock fd, so a just-closed session's `flock` can briefly
-/// look held. `Command::spawn`/`output` return only after `exec` has
-/// closed those copies (`O_CLOEXEC`). The `pwv` binary never forks
-/// (Section 5.7), so this is a property of the test harness only.
+/// another test's lock fd, so a just-closed session's `flock` can look held
+/// until the child drops its copy. `Command::spawn` does not wait for that:
+/// it returns once `exec` has replaced the child's memory, before the
+/// kernel runs close-on-exec (DESIGN_NOTES, M5: `open: InUse` in 3 of 12
+/// parallel local runs). [`SpawnLocked`] therefore has the child
+/// close its copies itself and report back before the write lock is
+/// released. The `pwv` binary never forks (Section 5.7), so this is a
+/// property of the test harness only.
 static FORK: RwLock<()> = RwLock::new(());
 
 fn open(paths: Paths, foreign: bool) -> Result<(Store, Vec<u8>), Error> {
@@ -56,14 +61,55 @@ fn create(paths: Paths, foreign: bool) -> Result<Store, Error> {
 }
 
 trait SpawnLocked {
+    /// Spawns under the write lock and returns only once the child holds
+    /// no copy of this process's file descriptors that name a file (lock
+    /// files included).
     fn spawn_locked(&mut self) -> std::io::Result<std::process::Child>;
 }
 
 impl SpawnLocked for std::process::Command {
     fn spawn_locked(&mut self) -> std::io::Result<std::process::Child> {
         let _g = FORK.write().unwrap_or_else(PoisonError::into_inner);
-        self.spawn()
+        let (mut done, tx) = std::io::pipe()?;
+        let signal = tx.as_raw_fd();
+        // Every lock fd exists by now: opens wait for the write lock.
+        let max = highest_fd();
+        // SAFETY: the hook runs in the forked child before `exec` and only
+        // makes async-signal-safe calls (`fstat`, `close`, `write`) on plain
+        // integers and a stack buffer. It closes the regular files and
+        // directories, which `exec` would close anyway (every fd of this
+        // process is close-on-exec); pipes (`signal`, those of `Command`)
+        // and devices are kept.
+        unsafe {
+            self.pre_exec(move || {
+                for fd in 3..=max {
+                    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+                    if libc::fstat(fd, st.as_mut_ptr()) == 0 {
+                        let kind = st.assume_init().st_mode & libc::S_IFMT;
+                        if kind == libc::S_IFREG || kind == libc::S_IFDIR {
+                            libc::close(fd);
+                        }
+                    }
+                }
+                // The `close` calls have returned, so the kernel has dropped
+                // this child's references (and any `flock` they kept alive).
+                match libc::write(signal, [1u8].as_ptr().cast(), 1) {
+                    1 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            });
+        }
+        let child = self.spawn()?;
+        done.read_exact(&mut [0u8])?;
+        Ok(child)
     }
+}
+
+/// The highest fd number open in this process.
+fn highest_fd() -> i32 {
+    let names = fs::read_dir("/proc/self/fd").unwrap().map(|e| e.unwrap());
+    let fds = names.filter_map(|e| e.file_name().to_str()?.parse().ok());
+    fds.max().unwrap_or(2)
 }
 
 /// Runs `cmd` to completion with spawns serialised (see [`FORK`]).
