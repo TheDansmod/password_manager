@@ -439,17 +439,46 @@ fn text(b: &[u8], lf: bool, utf8: Error, control: Error) -> Result<&str, Error> 
     Ok(s)
 }
 
+/// Checks an entry name (Section 7.2): 1–256 bytes, UTF-8, no control,
+/// no leading or trailing whitespace. Errors carry entry index `i`.
+///
+/// # Errors
+/// The first violated rule, in that order.
+pub fn check_name(name: &[u8], i: u32) -> Result<(), Error> {
+    ensure((1..=MAX_NAME).contains(&name.len()), Error::NameLength(i))?;
+    let s = text(name, false, Error::NameUtf8(i), Error::NameControl(i))?;
+    ensure(s.trim() == s, Error::NameWhitespace(i))
+}
+
+/// Checks a field key: 1–64 bytes, UTF-8, no control.
+///
+/// # Errors
+/// The first violated rule, in that order.
+pub fn check_key(key: &[u8], i: u32) -> Result<(), Error> {
+    ensure((1..=MAX_KEY).contains(&key.len()), Error::KeyLength(i))?;
+    text(key, false, Error::KeyUtf8(i), Error::KeyControl(i)).map(|_| ())
+}
+
+/// Checks a field value: at most 4,096 bytes, UTF-8, no control but LF.
+///
+/// # Errors
+/// The first violated rule, in that order.
+pub fn check_value(value: &[u8], i: u32) -> Result<(), Error> {
+    ensure(value.len() <= MAX_VALUE, Error::ValueLength(i))?;
+    text(value, true, Error::ValueUtf8(i), Error::ValueControl(i)).map(|_| ())
+}
+
 fn read_field<'a>(r: &mut Reader<'a>, i: u32) -> Result<FieldRef<'a>, Error> {
     let key_len = usize::from(r.u8()?);
     ensure((1..=MAX_KEY).contains(&key_len), Error::KeyLength(i))?;
     let key = r.bytes(key_len)?;
-    text(key, false, Error::KeyUtf8(i), Error::KeyControl(i))?;
+    check_key(key, i)?;
     let flags = r.u8()?;
     ensure(flags & !1 == 0, Error::FieldFlags(i))?;
     let value_len = usize::from(r.u16()?);
     ensure(value_len <= MAX_VALUE, Error::ValueLength(i))?;
     let value = r.bytes(value_len)?;
-    text(value, true, Error::ValueUtf8(i), Error::ValueControl(i))?;
+    check_value(value, i)?;
     Ok(FieldRef {
         key,
         sensitive: flags == 1,
@@ -463,8 +492,7 @@ fn read_entry<'a>(r: &mut Reader<'a>, i: u32) -> Result<EntryRef<'a>, Error> {
     let name_len = usize::from(r.u16()?);
     ensure((1..=MAX_NAME).contains(&name_len), Error::NameLength(i))?;
     let name = r.bytes(name_len)?;
-    let s = text(name, false, Error::NameUtf8(i), Error::NameControl(i))?;
-    ensure(s.trim() == s, Error::NameWhitespace(i))?;
+    check_name(name, i)?;
     let count = r.u16()?;
     ensure(count <= MAX_FIELDS, Error::FieldCount(i))?;
     let fields = Fields {
@@ -488,6 +516,23 @@ fn read_entry<'a>(r: &mut Reader<'a>, i: u32) -> Result<EntryRef<'a>, Error> {
         name,
         fields,
     })
+}
+
+/// The entry record at `offset` of a body that [`parse_body`] accepted
+/// (`offset` from [`EntryRef::offset`]). The record is checked again;
+/// `None` if no valid record starts there. Index variants are 0.
+#[must_use]
+pub fn entry_at(body: &[u8], offset: usize) -> Option<EntryRef<'_>> {
+    let short = Error::BodyLength;
+    read_entry(
+        &mut Reader {
+            buf: body,
+            pos: offset,
+            short,
+        },
+        0,
+    )
+    .ok()
 }
 
 /// Validates a whole plaintext body (spec Sections 7.2, 7.3) without
@@ -575,10 +620,21 @@ impl<'a> BodyWriter<'a> {
     /// [`Error::Capacity`]; [`Error::NameLength`] or [`Error::EntryCount`]
     /// if a length does not fit its field.
     pub fn entry(&mut self, name: &[u8]) -> Result<(), Error> {
+        self.entry_suffixed(name, b"")
+    }
+
+    /// Appends an entry record named `name` followed by `suffix` (import
+    /// renames), without first joining the two outside `out`.
+    ///
+    /// # Errors
+    /// As [`BodyWriter::entry`].
+    pub fn entry_suffixed(&mut self, name: &[u8], suffix: &[u8]) -> Result<(), Error> {
         let i = self.entries;
-        let len = u16::try_from(name.len()).map_err(|_| Error::NameLength(i))?;
-        self.put(&len.to_le_bytes())?;
+        let len = name.len().checked_add(suffix.len());
+        let len = len.and_then(|n| u16::try_from(n).ok());
+        self.put(&len.ok_or(Error::NameLength(i))?.to_le_bytes())?;
         self.put(name)?;
+        self.put(suffix)?;
         self.count_at = self.pos;
         self.fields = 0;
         self.put(&[0, 0])?;

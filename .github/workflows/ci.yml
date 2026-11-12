@@ -7,6 +7,9 @@
 # is a lib unit test), a vfat loop mount for T-STORE-1's foreign-filesystem
 # refusal, and `durability` (T-STORE-3 at 5,000 iterations; LazyFS for
 # T-STORE-8 joins it in M9).
+# M5: model tests in `test` (T-VAULT-1, T-VAULT-2, tests/vault.rs, every
+# configuration), T-FUZZ-6 (`fuzz_import`) in `fuzz-smoke`, Miri on the
+# model in `sanitizers`.
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -68,6 +71,7 @@ jobs:
           cargo rustc --locked --lib --profile check --features memtest -- --cfg miri -D warnings
           cargo rustc --locked --test format --profile check --no-default-features -- --cfg miri -D warnings
           cargo rustc --locked --test crypto --profile check --no-default-features --features testkdf -- --cfg miri -D warnings
+          cargo rustc --locked --test vault --profile check --no-default-features --features testkdf -- --cfg miri -D warnings
       - name: T-ENG-2, T-ENG-3, T-ENG-4 (source scanners)
         run: cargo test --locked --test eng
       - name: Install tokei
@@ -87,8 +91,11 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
+    # Timeout: M4 measured 25m49 on 26.04; M5 adds about 5.5 min per debug
+    # configuration locally (T-VAULT-1), so about 50 min is expected; 150 is
+    # provisional until the CI measurement is recorded (DESIGN_NOTES, M5).
     runs-on: ubuntu-26.04
-    timeout-minutes: 80
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
@@ -117,6 +124,20 @@ jobs:
               t_store_7_copy_fallback_without_hard_links \
               t_store_9_read_only_sessions_do_not_write; do
             grep -Eq "^test (store::tests::)?$t \.\.\. ok$" store.txt || { echo "missing: $t"; exit 1; }
+          done
+      - name: M5 gate by name (T-VAULT-1, T-VAULT-2; one line each in the log)
+        # The steps above already run these in every configuration; this
+        # step lists each gate test by name and fails if one did not run.
+        # Release (built by the step above), so the list costs about a minute.
+        run: |
+          cargo test --locked --release --test vault 2>&1 | tee vault.txt
+          for t in t_vault_1_model_matches_reference \
+              t_vault_2_collisions_leave_model_and_file_identical \
+              t_vault_2_random_models \
+              import_rejects_invalid_bodies_and_every_truncation \
+              entry_at_on_truncations_and_every_offset \
+              fuzz_import_corpus_seeds_are_committed; do
+            grep -Eq "^test $t \.\.\. ok$" vault.txt || { echo "missing: $t"; exit 1; }
           done
       - name: T-STORE-1 on a real foreign filesystem (vfat loop mount)
         # Refused without --allow-foreign-fs; with it, the full save protocol
@@ -159,8 +180,8 @@ jobs:
           grep -q "FAIL: v1-small.pwv: authentication failed" out.txt
 
   fuzz-smoke:
-    # T-FUZZ-1, T-FUZZ-2 (M2), T-FUZZ-3 (M3; with `testkdf`): 60 s per
-    # target, ASan, on every push.
+    # T-FUZZ-1, T-FUZZ-2 (M2), T-FUZZ-3 (M3; with `testkdf`), T-FUZZ-6
+    # (M5, import merge): 60 s per target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
     runs-on: ubuntu-26.04
@@ -179,6 +200,7 @@ jobs:
           - { target: fuzz_header, features: "" }
           - { target: fuzz_body, features: "" }
           - { target: fuzz_open, features: "--features testkdf" }
+          - { target: fuzz_import, features: "" }
     steps:
       - uses: actions/checkout@v5
       - name: Install nightly and cargo-fuzz
@@ -224,6 +246,16 @@ jobs:
               --no-default-features --features testkdf --test crypto --
               t_kat_ normalize_ kdf_write_policy ct_eq_and_wrap lifecycle_
               t_cry_2_ t_cry_4_ t_cry_6_ unlock_rejects_
+          # M5 model. T-VAULT-1 runs 2 cases without the ~120 KiB prefill
+          # and without file I/O (save and reopen go through the sealed file
+          # in memory). The 10,000-entry, capacity, and every-offset
+          # truncation sweeps run natively only.
+          - name: vault-model
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              t_vault_ new_ set_replaces renames_to_self mv_reorders
+              input_validation missing_entries import_merges import_suffix
+              import_one_save seal_ error_messages
     name: sanitizers (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5

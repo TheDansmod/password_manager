@@ -38,7 +38,13 @@ pub fn exit_code(e: vault::Error) -> i32 {
     match e {
         vault::Error::Crypto(C::Auth) => EXIT_AUTH,
         vault::Error::Format(_) | vault::Error::Generation => EXIT_INTEGRITY,
-        vault::Error::Crypto(C::Password | C::KdfParams) | vault::Error::Capacity => EXIT_USER,
+        vault::Error::Crypto(C::Password | C::KdfParams)
+        | vault::Error::Capacity
+        | vault::Error::Invalid(_)
+        | vault::Error::EntryExists
+        | vault::Error::FieldExists
+        | vault::Error::NoEntry
+        | vault::Error::NoField => EXIT_USER,
         vault::Error::Crypto(C::Kdf | C::KdfUnlocked) => EXIT_ENV,
         vault::Error::Crypto(C::Random | C::Length) => EXIT_INTERNAL,
     }

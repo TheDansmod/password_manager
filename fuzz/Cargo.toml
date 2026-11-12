@@ -49,3 +49,9 @@ doc = false
 bench = false
 required-features = ["testkdf"]
 
+[[bin]]
+name = "fuzz_import"
+path = "fuzz_targets/fuzz_import.rs"
+test = false
+doc = false
+bench = false

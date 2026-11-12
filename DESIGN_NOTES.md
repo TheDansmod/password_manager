@@ -836,3 +836,164 @@ M5; the specification is unchanged until then.
 - **T-STORE-3 on 26.04 (seed 0xb90fbed75c1b5f5):** 174 kills before the
   first commit, 4,826 after; 1,108 between `link` and rename, with a
   longest run of 5, so the round-1 regression case was exercised again.
+
+## 2026-11-11 — M5: model
+
+- **API.** `vault::Model<'a>` owns the two vault slots (live and scratch,
+  taken from `Slots`) and an index: a `Vec<usize>` of entry offsets, which
+  is not secret. `Model::new(live, scratch)` takes a decrypted body (unlock)
+  or an empty slot (init: the empty vault). Reads: `body`, `len`,
+  `entries`, and `get` (binary search over the index, through the new
+  `format::entry_at`). Operations: `add`, `set`, `unset`, `mv`, `mvfield`,
+  `rm`, `import`. Saving: `seal(dek, &mut header)`.
+- **Every operation is a full rewrite (principle 3).** It validates the
+  input, builds the list of output entries (`Vec<Item>`: borrowed slices
+  of the live slot and the caller's input slot, so pointers only, never
+  bytes), checks lookups, collisions, and limits, and writes the new body
+  with `BodyWriter` into scratch. `finish` re-validates the body. The
+  halves are then swapped and the old live half zeroized. On any error,
+  scratch is wiped and live is byte-identical to before. No secret byte is
+  ever copied outside the arena: suffixed import names are written in
+  two parts (`BodyWriter::entry_suffixed`), not joined first.
+- **Save sequence (Section 4, deviation in order only).** The data flow
+  says: serialise into scratch, encrypt there, then make scratch live.
+  Here the operation makes the new body live first (in memory). `seal` then
+  copies live into scratch, encrypts it in place there (`save`, which
+  also decrypts it back to verify), copies the ciphertext out, and wipes
+  scratch. The invariant is the same: plaintext exists only in the two
+  halves. Keeping save separate from the operation lets M7's guided `add`
+  run `add` followed by one `set` per field, then save once. Cancelling is
+  `rm`, which restores the identical body (the canonical form is unique),
+  without a save. A failed save is fatal to the session (Section 8.5), so
+  the in-memory model never outlives a disk that disagrees with it.
+- **Import (Section 12.2) uses one slot.** stdin is read into scratch, as
+  the spec says. There is no third buffer for the merge, so `import`
+  first validates the body (`parse_body`; an error is
+  `Invalid(<exact constraint, entry index>)`). It then moves the body to
+  the top of scratch (`copy_within`) and writes the merge into the bottom
+  (`split_at_mut`: the two regions are disjoint). The cost is that
+  **merged body + import body must fit the slot**; otherwise `Capacity`
+  is a clean error (fail closed). At the default 1 MiB arena the slot is
+  about 510 KiB, against kilobytes for a migrated vault.
+- **Suffix and collisions.** The suffix is ` (imported)`. The spec's
+  backticks hold stray spaces, and a name may not end in whitespace, so
+  no other reading is valid. Suffixed names can sort after other imported
+  names (`a (imported)` > `a !`), so the merge sorts the item list rather
+  than streaming. Rules: without `--on-conflict suffix`, any imported name
+  equal to an existing one is `EntryExists`. With it, the colliding name
+  gets the suffix; if the suffixed name is over 256 bytes, the result is
+  `Invalid(NameLength(i))` (i = the import's entry index). If the
+  suffixed name is itself taken (by a live entry or another imported
+  one), the result is `EntryExists`, never a second suffix. Then come
+  10,000 entries (`Invalid(EntryCount)`) and capacity. One import is one
+  operation, so the CLI does one save and one generation increment.
+- **Interpretations (rule 10).**
+  - Collision means "the new name or key belongs to a *different* entry
+    or field". `mv x x` is therefore a no-op, and `mvfield e password
+    Password` (case only; keys are unique under ASCII folding) renames that
+    field. Refusing these would block a harmless rename without protecting
+    anything, and B4 is about overwriting another item.
+  - `set`, `unset`, and `mvfield` address keys ASCII-case-insensitively,
+    the same rule the format uses for uniqueness. `set` on an existing key
+    replaces the value and flag in place and keeps the stored key
+    spelling (`mvfield` renames it). The sensitive-replacement
+    confirmation and hidden double entry are M7 (CLI).
+  - Check order, which the reference model mirrors: input validity
+    (`format::check_name`/`check_key`/`check_value`, in the parser's
+    order), lookups (`NoEntry`, `NoField`), collisions, count limits
+    (64 fields, 10,000 entries), then capacity.
+- **Errors.** New `vault::Error` variants: `Invalid(format::Error)` (user
+  input or an imported body; distinct from `Format`, which is integrity,
+  exit 3), `EntryExists`, `FieldExists`, `NoEntry`, `NoField`. All exit 1.
+  The messages are fixed, and an index in a user-operation error is 0.
+- **`format` additions** (+30 lines, 696/750): `check_name`, `check_key`,
+  `check_value` (the parser now calls them; same order, same variants),
+  `entry_at` (the record parser at an index offset), and
+  `BodyWriter::entry_suffixed`.
+- **Rule 7.** The per-operation plan is a `&mut dyn FnMut` (a trait object,
+  as in `store`/`secmem`), not a generic. `entries()` and the sort key
+  return `impl Iterator` (an opaque return type, not a type parameter).
+- **Section 15.5 checklist.** New parsing paths: the import body (the
+  existing strict `parse_body`) and `entry_at`. Fuzz target: T-FUZZ-6
+  `fuzz_import`. It imports two bodies, the second in either mode, and
+  compares with an independent merge oracle: exact merged model, or the
+  same error class with the body unchanged; scratch empty; the index finds
+  every entry. Truncation tests: `import_rejects_invalid_bodies_and_every_truncation`
+  (raw cut at every offset, and entries cut at every offset with a
+  consistent prefix) and `entry_at_on_truncations_and_every_offset`.
+  Local run (stable, `-s none`, 60 s): 249,730 execs, clean.
+  No new `unsafe`; no new disk write path; no secret outside the arena.
+- **T-VAULT-1** (`tests/vault.rs`): 256 cases. Each case uses a 256 KiB
+  or 1 MiB arena (cases in the 256 KiB arena start from 0–30 synthetic
+  4 KiB filler entries, so they reach `Capacity`) and 0–200 operations.
+  Every operation runs on the model and on a `BTreeMap` reference that
+  implements the rules independently, including the error precedence
+  and capacity (merged + import ≤ slot for import). After every operation
+  the test compares: the exact `Result`; entries, keys, flags, values, and
+  order; index lookups for every name the operation touches; scratch
+  empty; and, on an error, the body unchanged. Every 10 operations it
+  seals, saves through `store` (temporary directory under `/tmp`), closes,
+  reopens with `Store::open`, unwraps the DEK, decrypts, and compares the
+  exact canonical bytes. Generators: adversarial names (case, NFC/NFD,
+  leading and trailing whitespace including U+00A0/U+3000, the suffix,
+  limit lengths 245/246/256/257 bytes, 64 astral characters, controls
+  C0/DEL/C1, invalid UTF-8), keys and values at their limits, and
+  selectors that pick existing names and keys (in another ASCII case) at
+  run time, so hits and collisions are frequent. A non-vacuity check
+  requires every operation to succeed somewhere and every error class
+  to occur. One KDF run per test: the KEK and DEK are derived once and
+  shared by the cases.
+- **T-VAULT-2:** exhaustive on a near-duplicate fixture (every colliding
+  `add`, `mv` over ordered pairs, `mvfield` over ordered key pairs in
+  three ASCII cases, and `import` in abort mode alone and between new
+  names, plus suffix-mode secondary collisions; 100+ cases), and
+  property-based on 64 random models. Each case asserts: the exact `Err`;
+  the model body byte-identical; scratch wiped; the file on disk and the
+  directory listing unchanged. A positive control saves a real change.
+- **Test output holds no content (rule 9).** Generated content is a `Txt`
+  whose `Debug` is `[REDACTED; n bytes]`. Proptest's failure report and
+  `tests/vault.proptest-regressions` therefore show only op kinds,
+  lengths, and selector indices, and assertion messages name only
+  indices and error variants. An early run printed a raw model from a
+  strategy that yielded a bare `BTreeMap`; that strategy now yields
+  `Txt`, and the model is built inside the test. The regression file
+  that run wrote held the same bytes; it was deleted (its seed belonged
+  to the old strategy). To debug a failure,
+  replay its seed and inspect the arena with the `memtest` hooks
+  (`raw_data`), never by printing.
+- **Miri (T-SAN-2), new `vault-model` job.** T-VAULT-1 runs 2 cases,
+  without the prefill and without file I/O (save and reopen go through
+  the sealed file in memory), plus T-VAULT-2 and the operation tests. The
+  10,000-entry, capacity, and every-offset truncation sweeps run natively
+  only. Its runtime is not measured yet (no nightly in the sandbox).
+- **LOC.** `vault` 486/500 (lifecycle 196 + model 291), `crypto + format`
+  696/750, total 2,318/3,200. A simplification pass took `vault` from
+  504 to 486 (an `Item` constructor, a shorter field lookup, and one
+  reindex path). That pass also fixed a latent leak: `adopt` could return
+  before wiping scratch if reindexing failed.
+- **Local runtimes (this sandbox, tmpfs).** `cargo test --locked`: debug
+  511 s (`tests/vault` 328 s, of which T-VAULT-1 is most), memtest 566 s,
+  release 71 s, testkdf 527 s, memtest+testkdf 549–600 s. The debug cost
+  is pwv at `opt-level 0` validating bodies of up to ~120 KiB about four
+  times per operation; release takes seconds. No test was reduced for
+  speed: the exact-bytes comparison runs at every reopen and end of
+  segment, the entry, field, and flag comparison after every operation,
+  and the "before" copy is taken only when an error is expected. CI
+  `test` timeout: 80 → **150 min (provisional)**. M4 measured 25m49 on
+  26.04 and M5 adds about 4 × 5.5 min, so about 50 min is expected; set
+  the final cap to 3× once CI reports its runtime. The M5 gate-by-name
+  step runs in release (about 1 min). The Miri `vault-model` runtime is
+  unknown (the job cap is 115 min).
+- **Local-only failure found while measuring (not M5 code; reported to
+  the owner, not changed).** `tests/store.rs::state_file_damage_and_permissions_refused`
+  failed with `open: InUse` in 3 of 12 full parallel `testkdf` runs of
+  `tests/store`, 0 of 8 single-threaded, and 0 of 8 without
+  `t_store_3_kill_loop`. Likely cause: in `execve` the kernel releases a
+  vfork parent (`exec_mmap`) *before* it closes the child's `O_CLOEXEC`
+  fds (`do_close_on_exec`). So `Command::spawn` can return while the
+  child still holds a copy of another test's lock fd, and the M4 `FORK`
+  RwLock (held only around `spawn`) does not cover that window. Only the
+  kill loop spawns fast enough to hit it. The `pwv` binary never forks.
+  Possible harness fix, which loosens no assertion: keep the write lock
+  after `spawn` until `/proc/<pid>/fd` no longer lists a lock file.
+  Awaiting the owner's decision.
