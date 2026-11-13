@@ -700,8 +700,11 @@ fn label(r: &Result<usize, E>) -> &'static str {
 }
 
 fn cases(native: u32) -> Config {
-    // Miri (T-SAN-2) interprets every instruction: fewer cases there only.
-    let mut c = Config::with_cases(if cfg!(miri) { 2 } else { native });
+    // Miri (T-SAN-2) interprets every instruction: fewer cases there only,
+    // 2 unless PROPTEST_CASES is set (CI runs T-VAULT-1's two cases in two
+    // jobs, one case each with its own PROPTEST_RNG_SEED).
+    let miri = std::env::var("PROPTEST_CASES").map_or(2, |_| Config::default().cases);
+    let mut c = Config::with_cases(if cfg!(miri) { miri } else { native });
     c.source_file = Some(file!());
     c.failure_persistence = if cfg!(miri) {
         None

@@ -1079,3 +1079,62 @@ default 518 s, memtest 628 s, release 75 s, testkdf 495 s,
 memtest+testkdf 550 s. Two kill-loop failures in one development batch
 were `ENOSPC`: build directories had filled the 512 MiB `/tmp` tmpfs,
 not a test fault.
+
+## 2026-11-13 — M5 CI round 2: T-VAULT-1 under Miri split; word-wide wipes
+
+**Results.** Every job passed except `sanitizers (vault-model-t-vault-1)`,
+which hit its provisional 180 min cap with T-VAULT-1's 2 Miri cases in
+one job. A test that does not finish reports no time, so how long the two
+cases need is unknown.
+
+**Options considered.** GitHub ends any job on a hosted runner at 6 h
+(360 min). That is the ceiling for every cap, in private repositories as
+well. (In private repositories the runner minutes are also billed against
+the plan's monthly quota.)
+1. Raise the cap toward 360 min: blind, and a stall costs up to 6 h.
+2. Fewer operations or cases under Miri: weakens the Miri half of
+   T-VAULT-1 (rule 2). Not done; it needs the owner's decision.
+3. Run the sanitizers only nightly (spec Section 15.3): saves minutes but
+   does not shorten the job. Not done: the owner chose every push.
+4. Make each interpreted step cheaper, and split the job: done, below.
+
+**Changes (no test weakened).**
+- **`sys::wipe`: volatile `u64` stores.** The function covers the
+  aligned middle of the buffer with `zeroize` on `u64`, and the ends byte
+  by byte. It is used for every slot wipe (`SecretSlot::set_len`,
+  `clear`), the region teardown, and `scrub_stack`. `ZeroizingAlloc`
+  wipes the same way (`MaybeUninit<u64>`, one volatile store per word),
+  and its T-MEM-6 check reads `u64` words. The erasure is the same:
+  volatile stores, none of which may be elided. There are 8× fewer
+  stores, and Miri pays per store (about 0.2 ms per volatile byte,
+  inferred in round 1). This speeds up every Miri job; natively the
+  change is negligible. New tests: `wipe_zeroes_exactly_the_slice_at_every_alignment`
+  (`tests/secmem.rs`) and `every_size_and_offset_is_wiped_before_free`
+  (`tests/alloc.rs`). Two new `unsafe` blocks, `align_to_mut`/`align_to`
+  to `u64`, each with a `// SAFETY:` comment. `sys + secmem + alloc` is now
+  624/800.
+- **T-VAULT-1 under Miri: one case per job.** `cases()` keeps 2 cases
+  under Miri unless `PROPTEST_CASES` is set. CI runs two jobs,
+  `vault-model-t-vault-1-case-1` and `-case-2`. Each job runs one case
+  with `PROPTEST_RNG_SEED` 1 or 2, forwarded through Miri's isolation
+  with `-Zmiri-env-forward`. The case count is unchanged (2), and each
+  case now gets its own `--report-time` result. The seeds are simply the
+  first two integers, not chosen for size. Replaying the generation
+  natively (`--cfg miri` build, the same strategies) shows their size:
+  seed 1 has 153 operations, all seven kinds, and bodies up to 45 KiB;
+  seed 2 has 25 operations. Natively nothing changes (256 cases;
+  `PROPTEST_CASES` is ignored there, as before).
+- **Caps.** The two case jobs are capped at 330 min, a provisional value
+  below the 360 min job limit, so that this round yields a measurement
+  rather than another blind timeout. `vault-model` and
+  `vault-model-t-vault-2` stay at 180 min. Once measured, every cap goes
+  to 3× its time. If case 1 still exceeds 330 min, the remaining lever
+  is option 2, which the owner decides.
+
+**Why round 2 was slow (an estimate; Miri cannot run here).** A
+T-VAULT-1 operation validates the body three times: the parse in
+`items`, `finish`, and `reindex`. It also wipes about body + 8 KiB in the
+arena. On the test side, it wipes and checks the freed reference clone
+(body size) in `ZeroizingAlloc`. The cost therefore grows with the body,
+and without the prefill the body still reaches tens of KiB through 4 KiB
+`set` values.

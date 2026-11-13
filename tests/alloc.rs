@@ -16,6 +16,19 @@ fn t_mem_6_verifying_layer_is_active() {
 }
 
 #[test]
+fn every_size_and_offset_is_wiped_before_free() {
+    // `dealloc` wipes a `u64` at a time over the aligned middle and bytes
+    // at the ends; the verifying layer aborts if any byte survives. Blocks
+    // of every size up to four words, and sub-slices at every offset.
+    let before = GLOBAL.verified_count();
+    for n in 1..=32usize {
+        drop(vec![0xFFu8; n]);
+        drop(Box::<[u16]>::from(vec![0xFFFF; n]));
+    }
+    assert!(GLOBAL.verified_count() >= before + 64);
+}
+
+#[test]
 fn realloc_moves_and_preserves_contents() {
     let mut v: Vec<u32> = Vec::with_capacity(1);
     for i in 0..100_000u32 {

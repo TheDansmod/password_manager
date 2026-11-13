@@ -9,7 +9,6 @@
 
 use crate::sys::{self, GuardedRegion};
 use core::marker::PhantomData;
-use zeroize::Zeroize;
 
 /// Smallest permitted arena data size (256 KiB, `--arena-size`).
 pub const MIN_ARENA: usize = 256 * 1024;
@@ -311,7 +310,7 @@ impl<'a> SecretSlot<'a> {
             return Err(Error::Capacity);
         }
         if let Some(tail) = self.buf.get_mut(len..self.len) {
-            tail.zeroize();
+            sys::wipe(tail);
         }
         self.len = len;
         Ok(())
@@ -331,7 +330,7 @@ impl<'a> SecretSlot<'a> {
 
     /// Zeroizes the used prefix and sets the length to 0.
     pub fn clear(&mut self) {
-        self.expose_mut().zeroize();
+        sys::wipe(self.expose_mut());
         self.len = 0;
     }
 }

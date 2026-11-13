@@ -216,3 +216,24 @@ mod memtest {
         assert!(all_zero, "arena teardown must zeroize the full region");
     }
 }
+
+#[test]
+fn wipe_zeroes_exactly_the_slice_at_every_alignment() {
+    // `sys::wipe` stores a `u64` at a time over the aligned middle and
+    // bytes at the ends: every start offset and length up to three words.
+    let mut buf = [0u8; 64];
+    for start in 0..16 {
+        for len in 0..=24 {
+            buf.fill(0xA5);
+            pwv::sys::wipe(&mut buf[start..start + len]);
+            for (i, &b) in buf.iter().enumerate() {
+                let inside = (start..start + len).contains(&i);
+                assert_eq!(
+                    b,
+                    if inside { 0 } else { 0xA5 },
+                    "start {start} len {len} byte {i}"
+                );
+            }
+        }
+    }
+}

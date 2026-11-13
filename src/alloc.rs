@@ -68,12 +68,21 @@ unsafe impl GlobalAlloc for ZeroizingAlloc {
         let block = unsafe {
             core::slice::from_raw_parts_mut(ptr.cast::<MaybeUninit<u8>>(), layout.size())
         };
-        block.zeroize();
+        // Volatile stores, a `u64` at a time over the aligned middle (Miri
+        // pays per store; the erasure is the same as byte by byte).
+        // SAFETY: `MaybeUninit<u64>` accepts any contents, and `align_to_mut`
+        // only reinterprets the aligned middle of this same block.
+        let (head, mid, tail) = unsafe { block.align_to_mut::<MaybeUninit<u64>>() };
+        head.zeroize();
+        mid.iter_mut().for_each(Zeroize::zeroize);
+        tail.zeroize();
         if self.verify {
             let ptr = core::hint::black_box(ptr);
             // SAFETY: same block, now fully initialised (zeroed) above.
             let bytes = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
-            if bytes.iter().any(|&b| b != 0) {
+            // SAFETY: every bit pattern is a valid `u64`; read-only view.
+            let (head, mid, tail) = unsafe { bytes.align_to::<u64>() };
+            if head.iter().chain(tail).any(|&b| b != 0) || mid.iter().any(|&w| w != 0) {
                 std::process::abort();
             }
             self.verified.fetch_add(1, Ordering::Relaxed);

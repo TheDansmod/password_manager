@@ -253,15 +253,19 @@ jobs:
               --no-default-features --features testkdf --test crypto --
               t_kat_ normalize_ kdf_write_policy ct_eq_and_wrap lifecycle_
               t_cry_2_ t_cry_4_ t_cry_6_ unlock_rejects_
-          # M5 model, in three jobs. T-VAULT-1 runs 2 cases without the
+          # M5 model, in four jobs. T-VAULT-1 runs 2 cases, without the
           # ~120 KiB prefill and without file I/O (save and reopen go through
           # the sealed file in memory). The 10,000-entry, capacity, and
           # every-offset truncation sweeps run natively only.
-          # Round 1 ran all of these in one job and hit its 115 min cap after
-          # the 12 unit tests (62 min); T-VAULT-1/-2 never finished. Each op
-          # then wiped the whole 126 KiB scratch half byte by byte; it now
-          # wipes about body + 8 KiB. Caps are provisional (no measurement
-          # since that change; DESIGN_NOTES, M5 CI round 1).
+          # Round 1 ran all of the model tests in one job (115 min cap, hit).
+          # Round 2 ran them in three; `vault-model-t-vault-1` (both cases
+          # in one job) hit its 180 min cap. Since then: wipes and the
+          # allocator's zero check go a u64 at a time (an eighth of the
+          # interpreted stores), and T-VAULT-1's two cases run in two jobs,
+          # one case each (PROPTEST_CASES=1, fixed PROPTEST_RNG_SEED 1 and
+          # 2; seed 1 is 153 operations, seed 2 is 25), so --report-time
+          # gives a time per case. Caps are provisional and stay under
+          # GitHub's 360 min job limit (DESIGN_NOTES, M5 CI round 2).
           - name: vault-model
             timeout: 180
             args: >-
@@ -269,8 +273,15 @@ jobs:
               new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
-          - name: vault-model-t-vault-1
-            timeout: 180
+          - name: vault-model-t-vault-1-case-1
+            timeout: 330
+            seed: "1"
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-1-case-2
+            timeout: 330
+            seed: "2"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
@@ -287,6 +298,14 @@ jobs:
           rustup toolchain install nightly --profile minimal --component miri
           cargo +nightly miri setup
       - name: T-SAN-2 Miri (${{ matrix.name }})
+        # Entries with a `seed` run one proptest case with that fixed seed:
+        # Miri isolation hides the host environment, so the two variables
+        # are forwarded explicitly (tests/vault.rs, `cases`).
+        env:
+          PROPTEST_CASES: ${{ matrix.seed && '1' || '' }}
+          PROPTEST_RNG_SEED: ${{ matrix.seed }}
+          MIRIFLAGS: >-
+            ${{ matrix.seed && '-Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_RNG_SEED' || '' }}
         run: >-
           cargo +nightly miri test --locked ${{ matrix.args }}
           -Zunstable-options --report-time

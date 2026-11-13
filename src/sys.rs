@@ -147,8 +147,20 @@ pub fn read_stdin(buf: &mut [u8]) -> Result<usize, Error> {
 )]
 pub fn scrub_stack() {
     let mut buf = [0u8; 65536];
-    buf.zeroize();
+    wipe(&mut buf);
     core::hint::black_box(&mut buf);
+}
+
+/// Zeroizes `buf` with volatile stores (`zeroize`), one `u64` at a time
+/// over its aligned middle and byte by byte at the ends: the same erasure
+/// as `zeroize` on bytes, in an eighth of the stores (Miri pays per store).
+pub fn wipe(buf: &mut [u8]) {
+    // SAFETY: every bit pattern is a valid `u64`, and `align_to_mut` only
+    // reinterprets the aligned middle of this same exclusive borrow.
+    let (head, mid, tail) = unsafe { buf.align_to_mut::<u64>() };
+    head.zeroize();
+    mid.zeroize();
+    tail.zeroize();
 }
 
 /// Callback receiving the zeroized data part just before `munmap`.
@@ -296,7 +308,7 @@ impl GuardedRegion {
     /// Zeroize (if the data is accessible), munlock, optional snapshot, munmap.
     fn teardown(&mut self, hook: Option<SnapshotHook<'_>>) {
         if self.writable {
-            self.data_mut().zeroize();
+            wipe(self.data_mut());
         }
         if self.locked && !cfg!(miri) {
             // SAFETY: the range is the data part of our own mapping.
