@@ -10,6 +10,9 @@
 # M5: model tests in `test` (T-VAULT-1, T-VAULT-2, tests/vault.rs, every
 # configuration), T-FUZZ-6 (`fuzz_import`) in `fuzz-smoke`, Miri on the
 # model in `sanitizers`.
+# M6: generator tests in `test` (T-GEN-1 .. T-GEN-6, tests/gen.rs, every
+# configuration, plus an "M6 gate by name" step), Miri on `gen` in
+# `sanitizers` (two jobs), and the cfg(miri) compile check of tests/gen.rs.
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -74,6 +77,7 @@ jobs:
           cargo rustc --locked --test format --profile check --no-default-features -- --cfg miri -D warnings
           cargo rustc --locked --test crypto --profile check --no-default-features --features testkdf -- --cfg miri -D warnings
           cargo rustc --locked --test vault --profile check --no-default-features --features testkdf -- --cfg miri -D warnings
+          cargo rustc --locked --test gen --profile check --no-default-features -- --cfg miri -D warnings
       - name: T-ENG-2, T-ENG-3, T-ENG-4 (source scanners)
         run: cargo test --locked --test eng
       - name: Install tokei
@@ -139,6 +143,21 @@ jobs:
               entry_at_on_truncations_and_every_offset \
               fuzz_import_corpus_seeds_are_committed; do
             grep -Eq "^test $t \.\.\. ok$" vault.txt || { echo "missing: $t"; exit 1; }
+          done
+      - name: M6 gate by name (T-GEN-1 .. T-GEN-6; one line each in the log)
+        # The steps above already run these in every configuration; this
+        # step lists each gate test by name and fails if one did not run.
+        # Release (built by the steps above), so the list costs seconds.
+        run: |
+          cargo test --locked --release --test gen 2>&1 | tee gen.txt
+          for t in t_gen_1_byte_mapping_is_exact_for_every_n \
+              t_gen_1_word_mapping_is_exact_over_24_bits \
+              t_gen_2_exhaustive_uniformity t_gen_3_chi_square_default_policy \
+              t_gen_4_valid_policies_produce_valid_output \
+              t_gen_4_invalid_policies_return_err t_gen_4_each_constraint_at_its_limits \
+              t_gen_5_inclusion_exclusion_matches_brute_force \
+              t_gen_6_word_list_integrity; do
+            grep -Eq "^test $t \.\.\. ok$" gen.txt || { echo "missing: $t"; exit 1; }
           done
       - name: T-STORE-1 on a real foreign filesystem (vfat loop mount)
         # Refused without --allow-foreign-fs; with it, the full save protocol
@@ -290,6 +309,27 @@ jobs:
             args: >-
               --no-default-features --features testkdf --test vault --
               t_vault_2_
+          # M6 generator (tests/gen.rs), in two jobs. Miri runs the subset
+          # selected by cfg!(miri) inside the tests (T-GEN-1 over 8 values
+          # of n and a sample of 24-bit values, T-GEN-2 with 2 byte values
+          # per residue, T-GEN-4 with 8 + 16 cases, T-GEN-5 for n, L <= 4).
+          # T-GEN-3 (10^6 characters) and T-GEN-6 (SHA-256 of the 2.2 MB
+          # list) run natively only. `gen-words` holds the tests that draw
+          # passphrases: each word is found by a scan of the embedded list.
+          # Not measured yet: the caps are provisional (DESIGN_NOTES, M6).
+          - name: gen
+            timeout: 120
+            args: >-
+              --no-default-features --test gen --
+              --skip t_gen_3_ --skip t_gen_6_ --skip t_gen_4_valid
+              --skip word_draw --skip os_bytes --skip entropy_known
+              --skip rng_failure --skip passphrase_too_long
+          - name: gen-words
+            timeout: 180
+            args: >-
+              --no-default-features --test gen --
+              t_gen_4_valid word_draw os_bytes entropy_known
+              rng_failure passphrase_too_long
     name: sanitizers (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5

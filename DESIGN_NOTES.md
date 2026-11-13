@@ -1138,3 +1138,169 @@ arena. On the test side, it wipes and checks the freed reference clone
 (body size) in `ZeroizingAlloc`. The cost therefore grows with the body,
 and without the prefill the body still reaches tens of KiB through 4 KiB
 `set` values.
+
+## 2026-11-13 — M6: generator
+
+**API (`src/gen.rs`).** `generate(rng: &mut dyn ByteSource, policy:
+&Policy, out: &mut SecretSlot) -> Result<Entropy, Error>`. `Policy` is an
+enum: `Chars { len, classes: [bool; 4] /* l u d s */, symbols,
+no_ambiguous }` or `Words { count, sep }`, with `DEFAULT_CHARS` (20, luds,
+all 32 symbols) and `DEFAULT_WORDS` (6, `-`). `Policy::validate` checks
+every Section 10.1 constraint; option parsing is M7. Also public, for the
+gate tests: `map_draw` (stage 1), `sample` (two-stage sampling over an
+explicit alphabet of `(character, class)` pairs), `valid_count` (exact
+N(L), `u128`), `log2_count` (log2 N(L) in `f64`), and the constants
+(`WORDS`, `WORD_COUNT`, `MAX_ATTEMPTS`, the class sets, `AMBIGUOUS`).
+`OsBytes` wraps `crypto::fill_random`. Nothing names `getrandom`,
+`rustix`, or `libc`.
+
+**Deviation: the word list (owner instruction in spec Section 10.3).** The
+spec's last paragraph of 10.3 replaces the EFF large list with
+`/workspace/full_wordlist.txt`. It is copied byte-for-byte to
+`src/wordlist.txt` (the M0 location) and embedded with `include_str!`.
+Its SHA-256, `9b7bb4cc…a93320`, matches the owner's
+`full_wordlist_sha256sum.txt`, and its 205,690 lines match the line count
+the spec gives. Checked properties: LF line ends with a final LF; unique;
+sorted; every word `[a-z-]+` (lower-case ASCII; `drop-down`, `felt-tip`,
+`t-shirt`, and `yo-yo` contain a hyphen); 5 to 24 letters.
+`.gitattributes` marks it `-text`. Every spec number derived from the EFF
+list changes:
+
+| Item | Spec (EFF) | Now |
+| --- | --- | --- |
+| Words n (9.2, 10.1, T-GEN-6) | 7,776 | 205,690 |
+| Draw (10.2) | u16, accept below 62,208 (65,536 mod 7,776 = 3,328) | 24-bit big-endian (3 bytes), accept below 16,660,890 (2^24 mod n = 116,326), so 81 values per word, acceptance 0.99307 |
+| Bits per word (10.2) | 12.925 | 17.650 |
+| 6-word default H (10.2) | 77.5 bits | 105.90 bits (4 words: 70.6; 16: 282.4) |
+| T-GEN-6 | 7,776 lines, `[a-z-]+`, pinned SHA-256 | 205,690 lines, `[a-z-]+` (holds), unique and sorted, pinned SHA-256 |
+| Attribution (README) | CC BY 3.0 US (EFF) | not EFF; source and licence to be supplied by the owner |
+
+A 16-bit draw cannot index 205,690 words, so the draw is 3 bytes with the
+same construction as stage 1 (threshold = 2^24 − 2^24 mod n), and T-GEN-1
+tests that mapping exhaustively over all 2^24 values, as it tests the byte
+mapping. **Gen slot:** the longest passphrase is 16 × (24 + 1) − 1 = 399
+bytes, within the 1,024-byte `Gen` slot (T-GEN-6 asserts it). No arena
+change. **Supply chain:** the list is a data file, not a crate, so `cargo
+deny` does not cover it. The pinned digest in `tests/gen.rs` is its
+integrity control. The binary grows by 2.2 MB.
+
+**Deviation (rule 10): separator rule.** Section 10.1 allows any printable
+ASCII separator. A lower-case letter would make passphrases ambiguous:
+with `--sep e`, different word sequences can give the same string. Then
+the true entropy is below k · log2 n, and the displayed H would overstate
+it. The conservative choice is to refuse `a`–`z` (`Error::Separator`).
+Allowed: 0x20–0x7E except a–z (space, digits, upper case, punctuation).
+With `-`, decoding is still unique: no list word ends where another word
+has a hyphen (`drop`, `felt`, `t`, `yo` are not words), so the list is a
+prefix code over `-`-separated tokens. T-GEN-6 asserts that property, and
+T-GEN-4 checks that every generated passphrase decodes in exactly one way.
+
+**Interpretation (rule 10): the ambiguous set.** In the raw spec text,
+`` `I l 1 O 0 \` ' "`` can read as a backslash or an escaped backtick.
+`AMBIGUOUS` removes both: `I l 1 O 0 \ ` ' "` (nine characters). It
+applies to every class, including a custom `--symbols`.
+
+**Deviation (rule 7): no generic.** Section 10.1 writes `generate<R:
+ByteSource>`. Rule 7 forbids generics, so `generate` and `sample` take
+`&mut dyn ByteSource`, as M5 did with `&mut dyn FnMut`. `ByteSource` is
+the one trait rule 7 allows; it returns `gen::Error`.
+
+**Policy rules (rule 10, conservative).**
+- Constraints are checked in this order, and the first failure is
+  reported: length (8–128) or word count (4–16); classes non-empty;
+  symbols only ASCII punctuation (`is_ascii_punctuation`: printable
+  0x21–0x7E, not alphanumeric); no duplicate symbol; the symbol class
+  non-empty after `--no-ambiguous`; separator.
+- `--symbols` is validated even when `s` is not in `--classes`.
+- "L ≥ the number of required classes" always holds, because L ≥ 8 ≥ 4.
+  No separate check exists, since it could never fail.
+
+**Errors.** `gen::Error` has `Length`, `NoClasses`, `SymbolChar`,
+`SymbolDuplicate`, `SymbolsEmpty`, `WordCount`, `Separator`, `Attempts`,
+`Random`, `Capacity`, and `WordList` (internal: the list is shorter than
+`WORD_COUNT`). Messages are fixed and name the constraint, never content.
+Mapping these to exit codes in `cli::exit_code` is M7 work.
+
+**Secrets.**
+- Characters are drawn straight into `out`. A rejected stage-2 attempt is
+  overwritten in place by the next one (same length), and every error
+  clears the slot.
+- Words are appended to the slot one at a time. Each one is found by a
+  scan of `WORDS`, so no index table and no global is needed (T-ENG-3
+  forbids lazy globals).
+- Random bytes go through a 4-byte stack buffer, zeroized after each draw.
+- `generate` calls `sys::scrub_stack()` once at the end, so the drawn
+  indices and locals do not outlive the call (best effort, Section 5.6).
+- Nothing is formatted or put on the heap. The entropy is not secret.
+
+**Entropy.** `valid_count` is the exact inclusion–exclusion count, with
+checked `u128` arithmetic (`None` if it overflows; at most 16 classes).
+`log2_count` gives the displayed H as L log2 n + log2 Σ ±((n − m_S)/n)^L.
+The ratios stay in [0, 1], so no length overflows. T-GEN-5 checks
+`valid_count` against brute force for every composition of n ≤ 6 and every
+L ≤ 6, and `log2_count` against log2 of the exact count. Values from
+Python big integers: default 130.926 bits (L = 20, where the count
+overflows `u128`, so only the log path exists); L = 128 838.987;
+`--no-ambiguous` 127.969. The attempt cap: the smallest P(valid) of any
+valid policy is 0.0798 (L = 8, luds, `--no-ambiguous`, one symbol). The
+cap is therefore reached with probability below 2^−1199, consistent with
+the spec's (1 − 0.066)^10000 bound.
+
+**Tests (`tests/gen.rs`, 19 tests).**
+- **T-GEN-1:** every n in 2..256 over all 256 bytes, and the 24-bit word
+  mapping over all 2^24 values.
+- **T-GEN-2:** {a, b, C, 1}, L = 4. Running every 4-byte sequence (2^32
+  runs) is not practical. Instead, the source enumerates every residue
+  sequence (4^4) with 64 byte values per residue, so every byte value
+  occurs at every position. An attempt that asks for a fifth byte was
+  rejected at stage 2. Result: all 96 = N(4) valid strings, 64 times
+  each, and no invalid one.
+- **T-GEN-3:** seeded `ChaCha20Rng` (seed 3), 50,000 default passwords.
+  The expected frequencies are the exact conditional ones. Stage 2 makes
+  digits 11.88 % of the characters, not 1/94 per character, and the test
+  asserts that this shift shows. The critical value is 172.747 for 93
+  degrees of freedom at α = 10⁻⁶ (mpmath 1.3.0), used per position and
+  pooled.
+- **T-GEN-4:** 512 random valid policies (characters and words) and 4,096
+  arbitrary policies (validate equals an independent rule reading,
+  generate fails the same way with an empty slot, and no byte is drawn),
+  plus a limit table.
+- **T-GEN-5:** as above.
+- **T-GEN-6:** as above.
+- **Others:** the exact attempt cap (80,000 bytes for L = 8), RNG failure
+  at every point, malformed `sample` input, the ambiguous set, `OsBytes`,
+  the error messages, and slot capacity.
+- **Mutation sanity check (manual):** six injected faults (no stage-1
+  rejection, stage-2 accepting anything, the ambiguous filter always on,
+  the separator rule, the entropy exponent, the trailing separator) each
+  failed between 1 and 6 tests.
+- Debug run of `tests/gen`: about 11 s.
+- Full local matrix, all green: default 471 s, memtest 431 s, release
+  66 s, testkdf 419 s, memtest+testkdf 420 s. The proptest regression
+  file written by the injected faults was deleted (it held only
+  policies and seeds, from bugs that never existed).
+
+**Miri (T-SAN-2 for `gen`).**
+- **Subset under Miri:** T-GEN-1 for n ∈ {2, 3, 7, 94, 128, 129, 255,
+  256} and a stride of 24-bit values with the boundaries; T-GEN-2 with 2
+  byte values per residue; T-GEN-4 with 8 + 16 cases; T-GEN-5 for
+  n, L ≤ 4; entropy for L 8–9; the unit tests.
+- **Native only:** T-GEN-3 and T-GEN-6.
+- **CI jobs:** `gen` and `gen-words`. `gen-words` holds the tests that
+  draw passphrases, because each word is a scan of the 2.2 MB list,
+  whose Miri cost is unknown.
+- **Caps:** provisional 120 and 180 min. Set them to 3× the first
+  measurement.
+
+**LOC.** `gen` measures 268. Getting under the 200 cap would have meant
+cutting validation or robustness checks. The owner chose to raise the cap
+instead (2026-11-13): `scripts/loc_budget.py` now has `gen` 150 / 300. The
+spec's Section 3 table still reads 200, pending the owner's edit. The total
+is 2,597 / 3,200. No lint is allowed in `gen`.
+
+**Section 15.5 checklist.** No new place for secrets outside the arena.
+No `unsafe`. No parser of untrusted input: policies come from the M7
+tokenizer, which T-FUZZ-4 fuzzes. The "fuzz target and truncation test"
+item is therefore N/A. No disk writes. The LOC cap is raised by the owner.
+In Section 13, S3, generator bias, B2, B9, and E6 now have passing
+generator tests (T-GEN-1..6); the T-FUZZ-4 part of B2 is M7.

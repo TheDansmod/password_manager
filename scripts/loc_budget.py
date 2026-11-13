@@ -23,7 +23,8 @@ GROUPS = [
     ("crypto + format", ["crypto.rs", "format.rs"], 450, 750),
     ("store", ["store.rs"], 250, 450),
     ("vault", ["vault.rs"], 250, 500),
-    ("gen", ["gen.rs"], 150, 200),
+    # gen cap 200 -> 300: owner approval 2026-11-13 (DESIGN_NOTES, M6).
+    ("gen", ["gen.rs"], 150, 300),
     ("term + clip", ["term.rs", "clip.rs"], 300, 350),
     ("cli + main", ["cli.rs", "main.rs", "lib.rs"], 400, 500),
 ]

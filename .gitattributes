@@ -2,3 +2,5 @@
 *.pwv binary
 tests/vectors/MANIFEST -text
 fuzz/corpus/** binary
+# The embedded word list is pinned by SHA-256 (T-GEN-6): never convert line endings.
+src/wordlist.txt -text
