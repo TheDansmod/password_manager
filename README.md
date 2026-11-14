@@ -46,7 +46,6 @@ lower-case words (5 to 24 letters; four contain a hyphen), SHA-256
 `9b7bb4cc2ede3e5573174339e0547c774b67e769cfda1fbbc93038ec66a93320`,
 supplied by the project owner in place of the EFF large list (spec Section
 10.3). Each word carries about 17.65 bits; the 6-word default about 105.9.
-Source and licence attribution: to be recorded by the owner.
 
 The quick start, command reference, and migration checklist (spec Section
 12.3) are added in later milestones.

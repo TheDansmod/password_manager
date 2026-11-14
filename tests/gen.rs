@@ -584,6 +584,21 @@ fn valid_policy() -> impl Strategy<Value = Gen> {
     prop_oneof![chars, words]
 }
 
+/// Whether the reported entropy equals the expected `log2_count`: exactly
+/// natively; within 1e-9 bits under Miri, which adds deliberate,
+/// non-deterministic error of a few ULP to inexact float operations
+/// (`powi`, `log2`), so two calls of the same function can differ there
+/// (DESIGN_NOTES, M6 CI round 1).
+fn same_bits(got: f64, want: Option<f64>) -> bool {
+    want.is_some_and(|w| {
+        if cfg!(miri) {
+            (got - w).abs() < 1e-9
+        } else {
+            got == w
+        }
+    })
+}
+
 /// T-GEN-4 (valid half): random valid policies produce output of exactly
 /// length L containing every required class and only allowed characters;
 /// passphrases are exactly k list words that decode uniquely. The reported
@@ -615,12 +630,13 @@ fn t_gen_4_valid_policies_produce_valid_output() {
                         prop_assert!(out.iter().any(|c| set.contains(c)), "class {} missing", i);
                     }
                     let want = log2_count(&class_sizes(&sets), u32::try_from(*len).unwrap());
-                    prop_assert_eq!(Some(h.bits), want);
+                    prop_assert!(same_bits(h.bits, want), "entropy {} vs {:?}", h.bits, want);
                 }
                 Gen::Words { count, sep } => {
                     prop_assert_eq!(parses(out, *sep, *count), 1);
                     let k = u32::try_from(*count).unwrap();
-                    prop_assert_eq!(Some(h.bits), log2_count(&[WORD_COUNT], k));
+                    let want = log2_count(&[WORD_COUNT], k);
+                    prop_assert!(same_bits(h.bits, want), "entropy {} vs {:?}", h.bits, want);
                 }
             }
             Ok(())

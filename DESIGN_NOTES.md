@@ -1173,7 +1173,7 @@ list changes:
 | Bits per word (10.2) | 12.925 | 17.650 |
 | 6-word default H (10.2) | 77.5 bits | 105.90 bits (4 words: 70.6; 16: 282.4) |
 | T-GEN-6 | 7,776 lines, `[a-z-]+`, pinned SHA-256 | 205,690 lines, `[a-z-]+` (holds), unique and sorted, pinned SHA-256 |
-| Attribution (README) | CC BY 3.0 US (EFF) | not EFF; source and licence to be supplied by the owner |
+| Attribution (README) | CC BY 3.0 US (EFF) | MIT, Copyright (c) 2012 Rochester Institute of Technology (owner, 2026-11-13) |
 
 A 16-bit draw cannot index 205,690 words, so the draw is 3 bytes with the
 same construction as stage 1 (threshold = 2^24 − 2^24 mod n), and T-GEN-1
@@ -1294,8 +1294,8 @@ the spec's (1 − 0.066)^10000 bound.
 
 **LOC.** `gen` measures 268. Getting under the 200 cap would have meant
 cutting validation or robustness checks. The owner chose to raise the cap
-instead (2026-11-13): `scripts/loc_budget.py` now has `gen` 150 / 300. The
-spec's Section 3 table still reads 200, pending the owner's edit. The total
+instead (2026-11-13): `scripts/loc_budget.py` now has `gen` 150 / 300, and
+the owner updated the spec's Section 3 table to match. The total
 is 2,597 / 3,200. No lint is allowed in `gen`.
 
 **Section 15.5 checklist.** No new place for secrets outside the arena.
@@ -1304,3 +1304,94 @@ tokenizer, which T-FUZZ-4 fuzzes. The "fuzz target and truncation test"
 item is therefore N/A. No disk writes. The LOC cap is raised by the owner.
 In Section 13, S3, generator bias, B2, B9, and E6 now have passing
 generator tests (T-GEN-1..6); the T-FUZZ-4 part of B2 is M7.
+
+**Spec updated for the new word list (owner request, 2026-11-13).**
+Targeted edits replace the EFF-based numbers: Section 4 layout comment,
+6.5 (6 words ≈ 105.9 bits), 10.1 (`--words` row), 10.2 (24-bit draw,
+threshold 16,660,890, 17.650 bits per word, 105.9-bit default), 10.3
+(205,690 entries, pinned digest, 399-byte maximum, MIT), and T-GEN-6
+(205,690 lines). The owner chose to refuse a–z as a separator; 10.1's
+`--sep` row now reads "One printable ASCII character other than a–z".
+
+**Word-list licence file.** `src/wordlist.LICENSE` holds the standard MIT
+text with the owner-supplied copyright line ("Copyright (c) 2012 Rochester
+Institute of Technology"). It is not in Section 4's layout. MIT requires the
+notice in all copies, so M9's release artefacts must ship it (the binary
+embeds the list).
+
+## 2026-11-13 — Spec: coverage measurement and reporting (owner request)
+
+At the owner's request the spec now defines coverage in full (new Section
+14.13; T-COV-1 to T-COV-6). It covers: the production-code denominator
+(the T-ENG-6 rules), the merged runs (five feature configurations plus
+e2e with an instrumented binary), fixed property-test seeds, function
+coverage, mechanised rule 6 for `unsafe` blocks, a committed baseline
+with a 0.5 pp no-regression rule, nightly branch coverage, report-only
+fuzz-corpus coverage, a "Coverage exceptions" table in this file, the
+job-summary report, and self-hosted README badges (an orphan `badges`
+branch; no third-party upload). Related edits: 14 intro (thirteen
+families), the 14.11 T-COV row, 15.1 (nightly for T-COV-5), 15.3
+(`coverage`, `coverage-branch`, `coverage-report`), 15.4 (README badges),
+15.5 (checklist item), 13 (E4 row), and 16 (M9 scope and gate). Everything
+is M9 work; nothing is implemented now.
+
+## 2026-11-14 — M6 CI round 1: timings, caps, and a `gen-words` failure
+
+**Results (wall time per job, ubuntu-26.04).** lint 3m01, test 48m00,
+compat 9 s, fuzz-smoke (header 1m54, body 2m04, open 1m58, import 2m37),
+durability 3m24, coredump 1m19, supply 5m31. Sanitizers: format 9m34,
+format-10000-entries 11m10, format-testkdf 13m48, crypto-vault 9m43,
+vault-model 11m11, vault-model-t-vault-1-case-1 5h09m44,
+vault-model-t-vault-1-case-2 8m39, vault-model-t-vault-2 57m42, gen 3m24,
+gen-words hit its 180 min cap (cancelled). All passed except gen-words.
+`test` steps: default 12m35, memtest 9m57, release 2m52, testkdf 10m30,
+memtest+testkdf 10m26, M4 gate by name 40 s, M5 49 s, M6 3 s, vfat 1 s.
+
+**M5 open item closed.** Both T-VAULT-1 Miri cases pass (case 1 in
+5h09m44 of wall time, case 2 in 8m39). The M5 gate is complete on CI.
+
+**Miri's `--report-time` is not wall time.** Case 1 reports 30,623 s
+(8h30) inside a 5h10 job, and `gen` reports 235 s inside a 3m24 job.
+Under isolation Miri's clock is virtual (it advances with interpreted
+work), and libtest runs tests in parallel threads, which Miri interleaves
+on one host thread, so the per-test times overlap. Use the figures to rank
+tests, not to set caps; caps come from job wall times.
+
+**`gen-words`: a real failure, not only a timeout.** The log has
+`t_gen_4_valid_policies_produce_valid_output ... FAILED <6406.966s>`.
+libtest prints that only when the test has finished, so it failed. The job
+was cancelled later, while `word_draw_maps_three_bytes_to_the_listed_word`
+still ran, so the panic message (printed at the end) is missing. It passes
+natively in every configuration. Most likely cause: the test asserts
+`h.bits == log2_count(..)` with exact `f64` equality (tests/gen.rs, both
+arms), and recent Miri adds deliberate, non-deterministic error of a few
+ULP to non-exact float operations (`powi`, `log2`), so two calls of the
+same function differ. Every other float check in tests/gen.rs already uses
+a 1e-9 tolerance and passed under Miri. Fix (a test change, approved by
+the owner on 2026-11-14): `same_bits` in tests/gen.rs keeps exact equality
+natively and allows 1e-9 bits only under `cfg(miri)`, so the native check
+is unchanged. Not confirmed by the panic text; CI round 2 will show it.
+
+**No manual job selection (owner, 2026-11-14).** A `workflow_dispatch`
+input to run only chosen jobs was offered and declined: every change must
+run the whole suite so that unintended regressions surface. Running CI
+jobs on the owner's host was also declined: the sandbox exists to isolate
+agent work from the host.
+
+**Caps (3x measured, 10 min floor; all < 360).** lint 17→10, test
+190→144, compat 10, fuzz-smoke 10, durability 12→11, coredump 10, supply
+28→17; format 40→29, format-10000-entries 28→34, format-testkdf 73→42,
+crypto-vault 115→30, vault-model 180→34, case-2 330→26, vault-model-t-
+vault-2 180→173, gen 120→11. Exception: case 1 at 3x (15.5 h) cannot fit
+under the 360 min job limit, so it is capped at 350 (about 40 min of
+margin over the measurement). If runner variance pushes it over, the
+options are those of M5 CI round 2 (fewer Miri operations or another seed
+need the owner's approval; or make the interpreted code cheaper).
+
+**`gen-words` split.** One matrix entry per test (six, `--exact`), so a
+slow test no longer starves the others and each gets a wall time. At the
+owner's request (2026-11-14) each cap is a provisional 350 min, so that
+every test can finish and report. Not done yet: the one-pass word scan in
+`gen::words` (draw all k indices, one scan of the list; about 15 LOC; gen
+is at 268/300). It would cut the interpreted scan work per passphrase by
+about k/2 and is the preferred lever if the times stay long.

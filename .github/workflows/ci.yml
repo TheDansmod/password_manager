@@ -12,7 +12,8 @@
 # model in `sanitizers`.
 # M6: generator tests in `test` (T-GEN-1 .. T-GEN-6, tests/gen.rs, every
 # configuration, plus an "M6 gate by name" step), Miri on `gen` in
-# `sanitizers` (two jobs), and the cfg(miri) compile check of tests/gen.rs.
+# `sanitizers` (seven jobs since M6 CI round 1), and the cfg(miri)
+# compile check of tests/gen.rs.
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -21,7 +22,9 @@
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime. Caps were
-# last reset from the M5 CI round 1 timings (DESIGN_NOTES, M5 CI round 1).
+# last reset from the M6 CI round 1 timings (DESIGN_NOTES, M6 CI round 1).
+# Exceptions near GitHub's 360 min job limit, where 3x does not fit, are
+# capped at 350 and say so in their comment.
 name: ci
 
 on:
@@ -46,9 +49,9 @@ env:
 jobs:
   lint:
     # T-ENG-1 .. T-ENG-6 (T-ENG-5 compiles with the test suite from M1 on).
-    # Measured 5m29 (M5 round 1).
+    # Measured 3m01 (M6 round 1).
     runs-on: ubuntu-26.04
-    timeout-minutes: 17
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
@@ -97,10 +100,10 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
-    # Measured 1h02m17 (M5 round 1; M4 was 25m49): T-VAULT-1 runs in all
-    # five configurations.
+    # Measured 48m00 (M6 round 1; M5 round 1 was 1h02m17): T-VAULT-1 runs
+    # in all five configurations.
     runs-on: ubuntu-26.04
-    timeout-minutes: 190
+    timeout-minutes: 144
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
@@ -177,7 +180,7 @@ jobs:
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
     # models with argon2-cffi + PyNaCl (libsodium), sharing no code with pwv.
-    # Measured 10 s (M5 round 1); the 10 min floor applies.
+    # Measured 9 s (M6 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -205,7 +208,7 @@ jobs:
     # (M5, import merge): 60 s per target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
-    # Slowest target measured 2m56 (M5 round 1); the 10 min floor applies.
+    # Slowest target measured 2m37 (M6 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
@@ -247,7 +250,7 @@ jobs:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
     # nightly. One job per suite, in parallel, each with its own cap (3x its
-    # M5 round 1 time); --report-time names any slow test. T-SAN-1 (ASan)
+    # M6 round 1 time); --report-time names any slow test. T-SAN-1 (ASan)
     # is added in M9.
     runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
@@ -255,19 +258,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: format # measured 13m03
-            timeout: 40
+          - name: format # measured 9m34 (M6 round 1)
+            timeout: 29
             args: "--no-default-features --test format -- --skip t_fmt_2_entry_count"
-          - name: format-10000-entries # measured 9m06
-            timeout: 28
+          - name: format-10000-entries # measured 11m10 (M6 round 1)
+            timeout: 34
             args: "--no-default-features --test format -- --exact t_fmt_2_entry_count_0_max_max_plus_1"
-          - name: format-testkdf # measured 24m15
-            timeout: 73
+          - name: format-testkdf # measured 13m48 (M6 round 1)
+            timeout: 42
             args: "--no-default-features --features testkdf --test format --"
           # Native runs cover the heavy sweeps (T-CRY-1, -3, -5), the 6 MiB
           # capacity case, file I/O, and child processes (Miri isolation).
-          - name: crypto-vault # measured 37m43
-            timeout: 115
+          - name: crypto-vault # measured 9m43 (M6 round 1)
+            timeout: 30
             args: >-
               --no-default-features --features testkdf --test crypto --
               t_kat_ normalize_ kdf_write_policy ct_eq_and_wrap lifecycle_
@@ -283,53 +286,82 @@ jobs:
           # interpreted stores), and T-VAULT-1's two cases run in two jobs,
           # one case each (PROPTEST_CASES=1, fixed PROPTEST_RNG_SEED 1 and
           # 2; seed 1 is 153 operations, seed 2 is 25), so --report-time
-          # gives a time per case. Caps are provisional and stay under
-          # GitHub's 360 min job limit (DESIGN_NOTES, M5 CI round 2).
-          - name: vault-model
-            timeout: 180
+          # gives a time per case (DESIGN_NOTES, M5 CI round 2).
+          - name: vault-model # measured 11m11 (M6 round 1)
+            timeout: 34
             args: >-
               --no-default-features --features testkdf --test vault --
               new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
+          # Measured 5h09m44 (M6 round 1). 3x does not fit under GitHub's
+          # 360 min job limit: capped at 350, which leaves ~40 min of margin
+          # (owner, 2026-11-14; DESIGN_NOTES, M6 CI round 1).
           - name: vault-model-t-vault-1-case-1
-            timeout: 330
+            timeout: 350
             seed: "1"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
-          - name: vault-model-t-vault-1-case-2
-            timeout: 330
+          - name: vault-model-t-vault-1-case-2 # measured 8m39 (M6 round 1)
+            timeout: 26
             seed: "2"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
-          - name: vault-model-t-vault-2
-            timeout: 180
+          - name: vault-model-t-vault-2 # measured 57m42 (M6 round 1)
+            timeout: 173
             args: >-
               --no-default-features --features testkdf --test vault --
               t_vault_2_
-          # M6 generator (tests/gen.rs), in two jobs. Miri runs the subset
-          # selected by cfg!(miri) inside the tests (T-GEN-1 over 8 values
-          # of n and a sample of 24-bit values, T-GEN-2 with 2 byte values
-          # per residue, T-GEN-4 with 8 + 16 cases, T-GEN-5 for n, L <= 4).
-          # T-GEN-3 (10^6 characters) and T-GEN-6 (SHA-256 of the 2.2 MB
-          # list) run natively only. `gen-words` holds the tests that draw
-          # passphrases: each word is found by a scan of the embedded list.
-          # Not measured yet: the caps are provisional (DESIGN_NOTES, M6).
-          - name: gen
-            timeout: 120
+          # M6 generator (tests/gen.rs). Miri runs the subset selected by
+          # cfg!(miri) inside the tests (T-GEN-1 over 8 values of n and a
+          # sample of 24-bit values, T-GEN-2 with 2 byte values per residue,
+          # T-GEN-4 with 8 + 16 cases, T-GEN-5 for n, L <= 4). T-GEN-3 (10^6
+          # characters) and T-GEN-6 (SHA-256 of the 2.2 MB list) run
+          # natively only.
+          - name: gen # measured 3m24 (M6 round 1)
+            timeout: 11
             args: >-
               --no-default-features --test gen --
               --skip t_gen_3_ --skip t_gen_6_ --skip t_gen_4_valid
               --skip word_draw --skip os_bytes --skip entropy_known
               --skip rng_failure --skip passphrase_too_long
-          - name: gen-words
-            timeout: 180
+          # The tests that draw passphrases (each word is found by a scan of
+          # the embedded list), one job per test. Round 1 ran them in one
+          # job, which hit its provisional 180 min cap (DESIGN_NOTES, M6 CI
+          # round 1). Not measured yet: the 350 caps are provisional, at the
+          # owner's request, so that each test can finish (2026-11-14).
+          - name: gen-words-t-gen-4-valid
+            timeout: 350
             args: >-
               --no-default-features --test gen --
-              t_gen_4_valid word_draw os_bytes entropy_known
-              rng_failure passphrase_too_long
+              --exact t_gen_4_valid_policies_produce_valid_output
+          - name: gen-words-word-draw
+            timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact word_draw_maps_three_bytes_to_the_listed_word
+          - name: gen-words-os-bytes
+            timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact os_bytes_generates_both_modes
+          - name: gen-words-entropy-known
+            timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact entropy_known_values_and_both_paths
+          - name: gen-words-rng-failure
+            timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact rng_failure_at_every_point_clears_the_slot
+          - name: gen-words-passphrase-too-long
+            timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact passphrase_too_long_for_slot_is_capacity
     name: sanitizers (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v5
@@ -354,9 +386,9 @@ jobs:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), on every push and daily, against
     # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
-    # Measured 3m58 (M5 round 1).
+    # Measured 3m24 (M6 round 1).
     runs-on: ubuntu-26.04
-    timeout-minutes: 12
+    timeout-minutes: 11
     steps:
       - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)
@@ -370,7 +402,7 @@ jobs:
     # systemd-coredump as the piped core_pattern. A positive control first
     # proves that a crash of a dumpable process does produce an entry here,
     # so the negative check is not vacuous.
-    # Measured 1m54 (M5 round 1); the 10 min floor applies.
+    # Measured 1m19 (M6 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -417,9 +449,9 @@ jobs:
           coredumpctl --no-pager list || true
 
   supply:
-    # T-SUPPLY-1. Measured 9m13 (M5 round 1; it builds both tools).
+    # T-SUPPLY-1. Measured 5m31 (M6 round 1; it builds both tools).
     runs-on: ubuntu-26.04
-    timeout-minutes: 28
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@v5
       - name: Install cargo-deny and cargo-audit
