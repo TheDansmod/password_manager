@@ -12,7 +12,7 @@
 # model in `sanitizers`.
 # M6: generator tests in `test` (T-GEN-1 .. T-GEN-6, tests/gen.rs, every
 # configuration, plus an "M6 gate by name" step), Miri on `gen` in
-# `sanitizers` (seven jobs since M6 CI round 1), and the cfg(miri)
+# `sanitizers` (eight jobs since M6 CI round 2), and the cfg(miri)
 # compile check of tests/gen.rs.
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
@@ -22,7 +22,8 @@
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime. Caps were
-# last reset from the M6 CI round 1 timings (DESIGN_NOTES, M6 CI round 1).
+# last reset from the M6 CI round 1 timings (DESIGN_NOTES, M6 CI round 1);
+# the `gen-words` jobs first measured in M6 CI round 2 got theirs then.
 # Exceptions near GitHub's 360 min job limit, where 3x does not fit, are
 # capped at 350 and say so in their comment.
 name: ci
@@ -330,10 +331,17 @@ jobs:
           # The tests that draw passphrases (each word is found by a scan of
           # the embedded list), one job per test. Round 1 ran them in one
           # job, which hit its provisional 180 min cap (DESIGN_NOTES, M6 CI
-          # round 1). Not measured yet: the 350 caps are provisional, at the
-          # owner's request, so that each test can finish (2026-11-14).
-          - name: gen-words-t-gen-4-valid
-            timeout: 350
+          # round 1). Round 2: all passed except `word_draw`, which hit its
+          # provisional 350 cap. Cause, measured with Miri locally (M6 CI
+          # round 3): the test found the longest word with `max_by_key`,
+          # which is quadratic under Stacked Borrows (about 14 h for the
+          # 205,690 words). It now uses a linear loop, is split in two,
+          # and prints phase markers (--nocapture). Local Miri wall times:
+          # word-draw 48 min, word-draw-ends 13 min. Neither is
+          # measured on CI yet: 350 provisional, below the 360 min job
+          # limit; set 3x once CI reports.
+          - name: gen-words-t-gen-4-valid # measured 1h08m36 (M6 round 2)
+            timeout: 206
             args: >-
               --no-default-features --test gen --
               --exact t_gen_4_valid_policies_produce_valid_output
@@ -341,24 +349,29 @@ jobs:
             timeout: 350
             args: >-
               --no-default-features --test gen --
-              --exact word_draw_maps_three_bytes_to_the_listed_word
-          - name: gen-words-os-bytes
+              --exact word_draw_maps_three_bytes_to_the_listed_word --nocapture
+          - name: gen-words-word-draw-ends
             timeout: 350
+            args: >-
+              --no-default-features --test gen --
+              --exact word_draw_first_middle_and_last_index --nocapture
+          - name: gen-words-os-bytes # measured 10m11 (M6 round 2)
+            timeout: 31
             args: >-
               --no-default-features --test gen --
               --exact os_bytes_generates_both_modes
-          - name: gen-words-entropy-known
-            timeout: 350
+          - name: gen-words-entropy-known # measured 11m58 (M6 round 2)
+            timeout: 36
             args: >-
               --no-default-features --test gen --
               --exact entropy_known_values_and_both_paths
-          - name: gen-words-rng-failure
-            timeout: 350
+          - name: gen-words-rng-failure # measured 11m59 (M6 round 2)
+            timeout: 36
             args: >-
               --no-default-features --test gen --
               --exact rng_failure_at_every_point_clears_the_slot
-          - name: gen-words-passphrase-too-long
-            timeout: 350
+          - name: gen-words-passphrase-too-long # measured 10m12 (M6 round 2)
+            timeout: 31
             args: >-
               --no-default-features --test gen --
               --exact passphrase_too_long_for_slot_is_capacity

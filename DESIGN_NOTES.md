@@ -1395,3 +1395,172 @@ every test can finish and report. Not done yet: the one-pass word scan in
 `gen::words` (draw all k indices, one scan of the list; about 15 LOC; gen
 is at 268/300). It would cut the interpreted scan work per passphrase by
 about k/2 and is the preferred lever if the times stay long.
+
+## 2026-11-14 — M6 CI round 2: timings, and `word_draw` at the job limit
+
+**Results (wall time per job, ubuntu-26.04; owner screenshots).** lint
+2m58, test 51m27, compat 10 s, fuzz-smoke (header 2m08, body 1m54, open
+1m55, import 2m05), durability 3m38, coredump 53 s, supply 5m20.
+Sanitizers: format 8m51, format-10000-entries 12m02, format-testkdf 25m47,
+crypto-vault 9m37, vault-model 9m06, vault-model-t-vault-1-case-1
+5h11m24 (cap 350), vault-model-t-vault-1-case-2 6m25,
+vault-model-t-vault-2 2h04m49, gen 2m43, gen-words-t-gen-4-valid 1h08m36,
+gen-words-os-bytes 10m11, gen-words-entropy-known 11m58,
+gen-words-rng-failure 11m59, gen-words-passphrase-too-long 10m12. All
+passed except gen-words-word-draw, cancelled at its provisional cap
+(5h50m16).
+
+**The round 1 `gen-words` failure is fixed.** `t_gen_4_valid` passes
+under Miri with `same_bits` (M6 CI round 1), which confirms the float
+non-determinism diagnosis.
+
+**Caps.** Only the jobs first measured in this round changed (owner: no
+repeated resets of the 3x caps of older jobs): gen-words-t-gen-4-valid
+350→206, os-bytes 350→31, entropy-known 350→36, rng-failure 350→36,
+passphrase-too-long 350→31. Older jobs keep their round 1 caps. All
+round 2 times are under them; vault-model-t-vault-2 (2h04m49, cap 173)
+and format-testkdf (25m47, cap 42) are slower than in round 1, but within
+the cap.
+
+**Why `word_draw` is not explained by the list scans.** Each passphrase
+word is found by a scan of the 2.2 MB list. The scan work of each Miri test
+was counted by replaying its exact draws natively (fractions of one full
+scan):
+
+| Test | Full scans | Wall time |
+|---|---|---|
+| passphrase-too-long | about 0.5 to 1 | 10m12 |
+| rng-failure | about 3.0 | 11m59 |
+| entropy-known | about 4.8 | 11m58 |
+| word-draw | about 18.6 | > 5h50 (cancelled) |
+
+The first three differ by up to 4 scans but finish within 2 minutes of
+each other. So about 9–10 minutes of each job is fixed (setup and build),
+and a scan costs well under a minute. Even at t-gen-4-valid's implied
+upper bound of about 3 minutes per scan, word-draw would take about an
+hour. Something else in the test costs 15 to 20 times more than its
+scans. Word-draw's scan count is about 18.6, not 9.8 as first estimated:
+five words share the 24-byte maximum, and `max_by_key` picks the last of
+them, at index 175,813 (85% into the list). The draws of that index make
+up most of the scans.
+
+The step that only this test has is its first line: a pass over all 205,690
+words with `(0u32..).zip(..).max_by_key(..)` to find the longest word.
+This step is the leading suspect. A plausible mechanism (not verified) is a
+Stacked Borrows cost in that iterator chain, or one that it leaves for the
+later scans. The sandbox cannot run Miri (no nightly toolchain, a read-only
+rustup home, no network), so it could not be measured.
+
+**Fix (owner approved items 1, 2 and 4 of the proposal, 2026-11-14).**
+1. **Split.** `word_draw_maps_three_bytes_to_the_listed_word` keeps the
+   longest word drawn 16 times (3-byte draws, a rejected value redrawn,
+   399 bytes in the `Gen` slot). The first, middle and last index with `-`
+   move unchanged to the new `word_draw_first_middle_and_last_index`. Each
+   is its own Miri job (`gen-words-word-draw`, `gen-words-word-draw-ends`),
+   so each part gets a wall time and neither starves the other. Every
+   assertion is kept.
+2. **The longest word's index under Miri.** A new constant `LONGEST =
+   175_813` holds the word `max_by_key` selects. Natively, the test still
+   finds the word with the scan and now also asserts the index equals
+   `LONGEST`, which is stricter than before. Under Miri, it takes the word
+   by `nth_word(LONGEST)` and asserts its length of 24. The maximality of
+   24 bytes is still checked natively here and by T-GEN-6. Under Miri,
+   the iterator pass is the one check removed (owner approved under rule
+   2). The drawn word and the 16 draws are unchanged.
+3. Not done: the one-pass word scan in `gen::words` (draw all k indices,
+   then one scan). The numbers above suggest scans are not the cost. It
+   stays available if round 3 shows otherwise.
+4. **Phase markers.** Under Miri only, both tests write short markers
+   (`[miri] <test>: start`, `longest word found`, `16 words drawn`, `4
+   words drawn`, `expected words read`, `done`) to fd 2. They hold phase
+   names only, no content (rule 9). They are written by raw `write(2)`
+   through `sys::write_stderr`, because std stdio is banned (T-ENG-4,
+   no new lint exemption needed), and rustix 1.1.6 selects its libc
+   backend under Miri, which Miri supports. A raw write is not captured
+   by libtest; the two jobs pass `--nocapture` as well. GitHub's log
+   timestamps then show when each phase ended. A run cancelled at its cap
+   shows the last phase it reached.
+
+Both word-draw jobs keep a provisional 350 min cap until measured. The
+`gen` job's `--skip word_draw` covers both tests.
+
+**Local verification.** fmt; clippy in the five lint configurations; the
+`cfg(miri)` compile check of tests/gen.rs; `tests/eng` (T-ENG-4 scan:
+no new allow); `tests/gen` in all five feature configurations: 20
+passed each, including both word-draw tests and the new `LONGEST` check.
+
+**Miri access (owner offer, 2026-11-14).** A read-only volume with a
+nightly toolchain that includes Miri would let these costs be measured
+locally. It needs the `miri` and `rust-src` components and a prebuilt Miri
+sysroot (`cargo miri setup` downloads std's dependencies, which the
+sandbox cannot do), pointed to by `MIRI_SYSROOT`.
+
+## 2026-11-15 — M6 CI round 3: `word_draw` timeout, cause measured with Miri
+
+**Miri is now available in the sandbox** (owner, 2026-11-15):
+`nightly-2026-11-15` (miri 0.1.0, 5f4effd579) with a prebuilt sysroot
+(`MIRI_SYSROOT`). All figures below are local wall times on that
+toolchain, measured while other Miri processes ran, so they are upper
+bounds for this machine.
+
+**Cause of the 5h50 timeout: `max_by_key`, quadratic under Stacked
+Borrows.** The round 2 test found the longest list word with
+`(0u32..).zip(WORDS.split_terminator('\n')).max_by_key(|(_, w)| w.len())`.
+Measured on the first n words of the list:
+
+| n words | `max_by_key` (default Miri) | plain `nth(n)` scan |
+|---|---|---|
+| 500 | 0.9 s | — |
+| 1,000 | 2.3 s | — |
+| 2,000 | 4.8 s | 1.9 s |
+| 4,000 | 18.9 s | — |
+| 8,000 | about 88 s | — |
+| 20,000 | — | 16 s |
+
+- The scan is linear (about 0.8 ms per line, 2–4 min per full scan of the
+  205,690 lines). `max_by_key` grows about fourfold per doubling.
+  Extrapolated to the whole list it needs about 14 h, which alone exceeds
+  the 360 min job limit.
+- It is a Stacked Borrows cost: with `-Zmiri-disable-stacked-borrows` or
+  `-Zmiri-tree-borrows` the same pass is linear (4,000 → 8,000 words:
+  18.5 s → 28 s).
+- It is `max_by_key` itself, not `zip`: `max_by_key` without `zip` is
+  just as quadratic, and `zip` with `filter().count()` is linear. A loop
+  that keeps only `(index, length)`, and a `fold` over `&str`, are linear
+  too. The exact mechanism inside Miri was not traced further.
+- The list scans in `gen::words` are not the problem, as the round 2
+  entry had inferred.
+
+**Fix (test only; `src/` unchanged).** `word_draw_maps_three_bytes_to_the_listed_word`
+now finds the longest word with a loop that tracks `(index, length)` and
+selects the last maximum, as `max_by_key` did. It runs natively and under
+Miri, asserts the index equals `LONGEST` and the length equals the word's.
+This restores under Miri the check that round 2 had removed (item 2 of
+that entry), so the test is stricter than in round 2 and no weaker than
+before it. The split into two tests and the phase markers stay.
+
+**Local Miri results, both tests pass.**
+- `word_draw_first_middle_and_last_index`: 13m03 (4 words drawn after
+  7m28; expected words read after another 5m07).
+- `word_draw_maps_three_bytes_to_the_listed_word`, round 2 form (known
+  index): 55m14. The 16 draws of index 175,813 (13.7 full scans) took
+  50 min.
+- The same test with the restored check: the full-list pass plus one
+  lookup took 6m00, the 16 draws 41m31; total 47m35.
+
+**Caps.** Both word-draw jobs keep the provisional 350 min until CI
+reports a wall time; then 3x. In round 2 CI ran a scan faster than this
+sandbox does (entropy-known: 4.8 scans in an 11m58 job), so the CI times
+should be below the local ones.
+
+**Not done: cheaper scans in `gen::words`.** Each word still costs one
+scan. A byte loop over the list ran about 7x faster under Miri than
+`split_terminator('\n').nth(i)` (20,000 lines: 2.4 s against 16 s), and
+the one-pass variant of round 1 would cut `word_draw` to one scan. Both
+change production code only to speed up the interpreter, and no job
+needs it now. They remain the lever for `gen-words-t-gen-4-valid`
+(1h08m36) if wanted.
+
+**Local verification.** fmt; clippy `--all-targets` (default features);
+the `cfg(miri)` compile check of tests/gen.rs; both word-draw tests
+natively.

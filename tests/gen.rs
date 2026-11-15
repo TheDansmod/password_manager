@@ -264,16 +264,55 @@ fn t_gen_1_word_mapping_is_exact_over_24_bits() {
     assert_eq!(map_draw(256, 256, 2), None);
 }
 
+/// Index of the last of the five longest (24-byte) list words. The word
+/// draw test derives it with a scan and checks this value, natively and
+/// under Miri (DESIGN_NOTES, M6 CI round 3).
+const LONGEST: u32 = 175_813;
+
+/// Under Miri, writes a phase marker to fd 2 so that a run cancelled at its
+/// cap shows in the timestamped CI log how far it got. A phase name only, no
+/// content (rule 9). Raw `write(2)` through `sys::write_stderr` (std stdio
+/// is banned, T-ENG-4; rustix uses its libc backend under Miri), so libtest
+/// does not capture it and `--nocapture` is not strictly needed.
+fn mark(test: &str, phase: &str) {
+    if cfg!(miri) {
+        for part in [
+            &b"[miri] "[..],
+            test.as_bytes(),
+            b": ",
+            phase.as_bytes(),
+            b"\n",
+        ] {
+            pwv::sys::write_stderr(part);
+        }
+    }
+}
+
 /// The word draw end to end: 3 big-endian bytes per draw, a rejected value
 /// is redrawn, and index i yields line i of the list. Sixteen copies of the
-/// longest word fill 399 bytes, which fits the 1 KiB `Gen` slot.
+/// longest word fill 399 bytes, which fits the 1 KiB `Gen` slot. (The
+/// first, middle, and last index are in
+/// `word_draw_first_middle_and_last_index`.)
 #[test]
 fn word_draw_maps_three_bytes_to_the_listed_word() {
-    let (longest, word) = (0u32..)
-        .zip(WORDS.split_terminator('\n'))
-        .max_by_key(|(_, w)| w.len())
-        .unwrap();
+    const T: &str = "word_draw_maps_three_bytes_to_the_listed_word";
+    mark(T, "start");
+    // The last longest word, tracked as (index, length) only. Do not use
+    // `max_by_key` here: it carries a `&str` into the list through every
+    // step, and Miri's Stacked Borrows bookkeeping for that is quadratic in
+    // the number of words visited (hours for 205,690 words; DESIGN_NOTES,
+    // M6 CI round 3). This loop selects the same word and is linear.
+    let mut found = (0u32, 0usize);
+    for (i, w) in (0u32..).zip(WORDS.split_terminator('\n')) {
+        if w.len() >= found.1 {
+            found = (i, w.len());
+        }
+    }
+    assert_eq!(found.0, LONGEST, "index of the longest word");
+    let (longest, word) = (LONGEST, nth_word(LONGEST as usize));
+    assert_eq!(found.1, word.len());
     assert_eq!(word.len(), 24);
+    mark(T, "longest word found");
     let mut a = arena();
     let mut s = a.slots().unwrap();
     let i = longest.to_be_bytes();
@@ -288,11 +327,24 @@ fn word_draw_maps_three_bytes_to_the_listed_word() {
         sep: b' ',
     };
     generate(&mut rng, &policy, &mut s.r#gen).unwrap();
+    mark(T, "16 words drawn");
     assert_eq!(rng.asked, bytes.len());
     let want = vec![word; 16].join(" ");
     assert_eq!(s.r#gen.len(), 16 * 25 - 1);
     assert!(s.r#gen.expose() == want.as_bytes(), "passphrase differs");
-    // First, middle, and last index (repeated), with separator '-'.
+    mark(T, "done");
+}
+
+/// The word draw at the list's ends: first, middle, and last index (the
+/// last repeated), with separator '-'. Split from
+/// `word_draw_maps_three_bytes_to_the_listed_word` (DESIGN_NOTES, M6 CI
+/// round 2); the assertions are unchanged.
+#[test]
+fn word_draw_first_middle_and_last_index() {
+    const T: &str = "word_draw_first_middle_and_last_index";
+    mark(T, "start");
+    let mut a = arena();
+    let mut s = a.slots().unwrap();
     let last = WORD_COUNT - 1;
     let mut bytes = Vec::new();
     for idx in [0, 102_845, last, last] {
@@ -304,9 +356,12 @@ fn word_draw_maps_three_bytes_to_the_listed_word() {
         sep: b'-',
     };
     generate(&mut rng, &policy, &mut s.r#gen).unwrap();
+    mark(T, "4 words drawn");
     let l = nth_word(last as usize);
     let want = [nth_word(0), nth_word(102_845), l, l].join("-");
+    mark(T, "expected words read");
     assert!(s.r#gen.expose() == want.as_bytes(), "passphrase differs");
+    mark(T, "done");
 }
 
 // ------------------------------------------------------------ T-GEN-2
