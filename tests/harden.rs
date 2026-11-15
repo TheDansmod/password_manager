@@ -27,6 +27,34 @@ fn harden_refuses_non_tty_with_exit_4() {
     assert!(out.stdout.is_empty());
 }
 
+/// M7 (owner decision 2026-11-15): stdout must always be a terminal, with
+/// the same message as before, whatever stdin is and whatever the command.
+#[test]
+fn harden_refuses_non_tty_stdout_for_every_command() {
+    for args in [
+        &["ls"][..],
+        &["import", "--from-stdin"],
+        &["doctor"],
+        &["help"],
+    ] {
+        for stdin in [Stdio::null(), Stdio::piped()] {
+            let out = common::pwv_command()
+                .args(args)
+                .stdin(stdin)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run pwv");
+            assert_eq!(out.status.code(), Some(4));
+            assert_eq!(
+                String::from_utf8_lossy(&out.stderr),
+                "pwv: standard input and output must be a terminal\n"
+            );
+            assert!(out.stdout.is_empty());
+        }
+    }
+}
+
 /// Child half of the panic-hook test; a no-op unless its env var is set.
 #[test]
 fn panic_hook_child() {
@@ -102,9 +130,12 @@ fn t_mem_5_core_limit_ptrace_mem_and_sigsegv() {
     use std::os::unix::fs::MetadataExt;
     use std::time::{Duration, Instant};
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut cmd = common::pwv_command();
-    cmd.current_dir(tmp.path());
+    // Since M7 a bare `pwv` exits at once when no vault exists. `pwv init`
+    // waits at its first prompt, which gives a live, hardened process
+    // (DESIGN_NOTES, M7). The scratch home keeps the real one untouched.
+    let home = common::pty::Home::new();
+    let tmp = home.dir.path().join("cwd");
+    let cmd = home.command(&["init"]);
     let mut session = expectrl::session::Session::spawn(cmd).expect("spawn pwv under a pty");
     let pid = session.get_process().pid().as_raw();
 
@@ -205,6 +236,6 @@ fn t_mem_5_core_limit_ptrace_mem_and_sigsegv() {
         }
         other => panic!("expected death by SIGSEGV, got {other:?}"),
     }
-    let left: Vec<_> = std::fs::read_dir(tmp.path()).expect("tmp").collect();
+    let left: Vec<_> = std::fs::read_dir(&tmp).expect("tmp").collect();
     assert!(left.is_empty(), "files (core?) left in cwd: {left:?}");
 }

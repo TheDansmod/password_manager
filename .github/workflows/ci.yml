@@ -14,6 +14,13 @@
 # configuration, plus an "M6 gate by name" step), Miri on `gen` in
 # `sanitizers` (eight jobs since M6 CI round 2), and the cfg(miri)
 # compile check of tests/gen.rs.
+# M7: `e2e` (T-E2E-1 .. T-E2E-12 on a PTY, T-CLIP-1 .. T-CLIP-4 under
+# `xvfb-run` with `xclip`, plus an "M7 gate by name" step), the pure
+# cli/term tests (tests/cli.rs) and the PTY tests in every `test`
+# configuration (there the clipboard tests return at once: no display),
+# and T-FUZZ-4 (`fuzz_tokenizer`), T-FUZZ-5 (`fuzz_sanitize`) in
+# `fuzz-smoke`. The `strength` feature and `zxcvbn` are gone (DESIGN_NOTES,
+# M7).
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -71,7 +78,7 @@ jobs:
         run: cargo clippy --locked --all-targets --features memtest -- -D warnings
       - name: T-ENG-1/T-ENG-4 clippy (testkdf)
         run: cargo clippy --locked --all-targets --features testkdf -- -D warnings
-      - name: clippy (fuzz targets, all three)
+      - name: clippy (fuzz targets)
         working-directory: fuzz
         run: cargo clippy --locked --bins --features testkdf -- -D warnings
       - name: cfg(miri) heap backend compiles (Miri itself runs in `sanitizers`)
@@ -178,6 +185,65 @@ jobs:
             -- --exact t_store_1_foreign_fs_real_mount 2>&1 | tee out.txt
           grep -q "test result: ok. 1 passed" out.txt
 
+  e2e:
+    # M7 gate (spec 15.3): T-E2E-1 .. T-E2E-12 through a PTY (tests/e2e.rs),
+    # T-CLIP-1 .. T-CLIP-4 and the clipboard half of T-E2E-6 on X11
+    # (tests/clip.rs, under xvfb-run, with xclip and a mock clipboard
+    # manager built on x11rb), and the pure cli/term tests (tests/cli.rs).
+    # PWV_REQUIRE_X11 turns a missing display into a failure, so the
+    # clipboard tests cannot pass vacuously. T-MEM-* stay in `test` and
+    # `coredump`. Not measured yet: 30 min provisional (local: e2e 40 s,
+    # of which T-E2E-6 waits 31 s; clip about 2 min expected).
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      PWV_REQUIRE_X11: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Xvfb and xclip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip
+      - name: T-E2E, T-CLIP (default features)
+        run: xvfb-run -a cargo test --locked --test cli --test e2e --test clip 2>&1 | tee e2e.txt
+      - name: T-E2E without the clipboard feature (copy fails cleanly)
+        run: cargo test --locked --no-default-features --test cli --test e2e --test clip
+      - name: T-E2E, T-CLIP against the release binary
+        run: xvfb-run -a cargo test --locked --release --test e2e --test clip
+      - name: M7 gate by name (one line each in the log)
+        run: |
+          for t in t_e2e_1_init_weak_password_refused t_e2e_1_init_mismatch_refused \
+              t_e2e_1_init_weak_password_needs_flag_and_sentence \
+              t_e2e_1_init_generated_passphrase_accepted \
+              t_e2e_1_init_refuses_existing_vault \
+              t_e2e_2_missing_vault_names_init_and_creates_nothing \
+              t_e2e_3_ls_names_only_and_show_masks \
+              t_e2e_4_reveal_once_then_clears_screen_and_scrollback \
+              t_e2e_5_add_and_set_errors_keep_the_session \
+              t_e2e_5_set_replacing_a_sensitive_value_needs_confirmation \
+              t_e2e_5_overlong_password_line_is_rejected_not_truncated \
+              t_e2e_6_idle_timeout_locks_and_exits_0 \
+              t_e2e_7_sigint_cancels_the_command \
+              t_e2e_7_sigterm_sighup_sigquit_exit_cleanly_and_restore_termios \
+              t_e2e_8_control_and_bidi_characters_are_shown_as_escapes \
+              t_e2e_9_rm_needs_the_exact_name_and_there_is_no_export \
+              t_e2e_10_import_valid_invalid_and_tty \
+              t_e2e_11_passwd_then_only_the_new_password_opens \
+              t_e2e_12_no_terminal_is_exit_4 \
+              t_cry_2_wrong_password_and_damage_look_the_same \
+              t_store_5_rollback_warning_no_exits_3_yes_continues \
+              t_store_9_read_only_commands_never_write \
+              x11::t_clip_1_copy_sets_the_history_exclusion_hint \
+              x11::t_clip_2_clipboard_is_cleared_after_the_timeout \
+              x11::t_clip_3_a_foreign_value_is_not_cleared \
+              x11::t_clip_4_the_clipboard_manager_receives_nothing_sensitive_at_exit \
+              x11::t_e2e_6_idle_exit_clears_the_clipboard \
+              tokenizer_and_parser_on_every_truncation tokenizer_properties \
+              sanitize_every_unsafe_character sanitize_properties_and_truncation \
+              fuzz_corpus_seeds_are_committed; do
+            grep -Eq "^test $t \.\.\. ok$" e2e.txt || { echo "missing: $t"; exit 1; }
+          done
+
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
     # models with argon2-cffi + PyNaCl (libsodium), sharing no code with pwv.
@@ -206,7 +272,8 @@ jobs:
 
   fuzz-smoke:
     # T-FUZZ-1, T-FUZZ-2 (M2), T-FUZZ-3 (M3; with `testkdf`), T-FUZZ-6
-    # (M5, import merge): 60 s per target, ASan, on every push.
+    # (M5, import merge), T-FUZZ-4 (M7, tokenizer and command parser),
+    # T-FUZZ-5 (M7, sanitize): 60 s per target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
     # Slowest target measured 2m37 (M6 round 1); the 10 min floor applies.
@@ -227,6 +294,9 @@ jobs:
           - { target: fuzz_body, features: "" }
           - { target: fuzz_open, features: "--features testkdf" }
           - { target: fuzz_import, features: "" }
+          # M7; not measured on CI yet (the 10 min floor applies).
+          - { target: fuzz_tokenizer, features: "" }
+          - { target: fuzz_sanitize, features: "" }
     steps:
       - uses: actions/checkout@v5
       - name: Install nightly and cargo-fuzz

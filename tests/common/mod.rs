@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub mod pty;
 pub mod vaults;
 
 use std::process::{Command, Output};

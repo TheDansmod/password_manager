@@ -26,7 +26,6 @@ rustix = { version = "1.1.6", features = ["event", "fs", "mm", "param", "process
 libc = "0.2.191"
 unicode-normalization = "0.1.26"
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"], optional = true }
-zxcvbn = { version = "3.1.1", default-features = false, optional = true }
 
 [dev-dependencies]
 expectrl = "0.9.0"
@@ -35,11 +34,13 @@ rand_chacha = "0.10.0"
 sha2 = "0.11.1"
 static_assertions = "1.1.0"
 tempfile = "3.27.0"
+# T-CLIP-4's mock clipboard manager (tests/clip.rs). Already in the graph
+# through arboard, at this exact version.
+x11rb = "0.13.2"
 
 [features]
-default = ["clipboard", "strength"]
+default = ["clipboard"]
 clipboard = ["dep:arboard"]
-strength = ["dep:zxcvbn"]
 # Test-only (Section 5.8). Never enabled in release artefacts (T-ENG-7).
 memtest = []
 # Test-only (Section 6.4). Never enabled in release artefacts (T-ENG-7).

@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.12"
-# No clipboard/strength: the fuzzed code is pure and needs neither.
+# No clipboard: the fuzzed code is pure and does not need it.
 pwv = { path = "..", default-features = false }
 
 [features]
@@ -52,6 +52,20 @@ required-features = ["testkdf"]
 [[bin]]
 name = "fuzz_import"
 path = "fuzz_targets/fuzz_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tokenizer"
+path = "fuzz_targets/fuzz_tokenizer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sanitize"
+path = "fuzz_targets/fuzz_sanitize.rs"
 test = false
 doc = false
 bench = false

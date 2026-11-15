@@ -6,11 +6,15 @@
 //! madvise, munmap}`, `mm::Advice::{LinuxDontDump, LinuxWipeOnFork}`,
 //! `termios::isatty`, `io::{read, write}`, `stdio::{stdin, stderr}`; M4:
 //! `fs::{open, openat, fstat, statat, fstatfs, flock, fsync, renameat,
-//! linkat, unlinkat, Dir}`, `process::geteuid`.
+//! linkat, unlinkat, Dir}`, `process::geteuid`; M7: `termios::{tcgetattr,
+//! tcsetattr, OptionalActions::Now, LocalModes::ECHO}`, `event::{poll,
+//! PollFd, PollFlags, Timespec}`. libc 0.2.191 (M7): `sigaction`,
+//! `sigemptyset` (rustix has no `sigaction`).
 
 #![allow(unsafe_code)]
 
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU8, Ordering};
 use rustix::fd::{BorrowedFd, OwnedFd};
 use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, OFlags};
 pub use rustix::io::Errno;
@@ -36,8 +40,8 @@ pub enum Error {
     Advise,
     /// `mlock` failed (typically `RLIMIT_MEMLOCK`).
     Lock,
-    /// `read(2)` failed.
-    Read,
+    /// `sigaction` failed.
+    Signal,
 }
 
 impl Error {
@@ -51,7 +55,7 @@ impl Error {
             Error::Map => "cannot map protected memory",
             Error::Advise => "cannot exclude protected memory from dumps and forks",
             Error::Lock => "cannot lock memory (RLIMIT_MEMLOCK too low)",
-            Error::Read => "cannot read from the terminal",
+            Error::Signal => "cannot install signal handlers",
         }
     }
 }
@@ -61,13 +65,18 @@ impl Error {
 pub struct Hardening {
     /// Effective soft `RLIMIT_MEMLOCK` in bytes; `None` means unlimited.
     pub memlock_limit: Option<u64>,
+    /// Whether fd 0 is a terminal. Only `import --from-stdin` may run
+    /// without one (Sections 9.3, 12.2); `cli` refuses everything else.
+    pub stdin_tty: bool,
 }
 
 /// Hardens the process (spec Section 5.1). Must be the first call in `main`.
 ///
 /// Steps, in order: `RLIMIT_CORE` = {0, 0}; `PR_SET_DUMPABLE` = 0 (skipped in
-/// `memtest` builds, Section 5.8); `umask(0o077)`; fds 0 and 1 must be TTYs;
-/// panic hook; raise the soft `RLIMIT_MEMLOCK` to the hard limit.
+/// `memtest` builds, Section 5.8); `umask(0o077)`; fd 1 must be a TTY, and
+/// whether fd 0 is one is recorded for `cli` (a pipe is allowed only for
+/// `import --from-stdin`); panic hook; raise the soft `RLIMIT_MEMLOCK` to
+/// the hard limit.
 ///
 /// # Errors
 /// Any failure of steps 1–4 (step 5 cannot fail; step 6 is best effort).
@@ -81,11 +90,10 @@ pub fn harden() -> Result<Hardening, Error> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| Error::Dumpable)?;
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
-    if !rustix::termios::isatty(rustix::stdio::stdin())
-        || !rustix::termios::isatty(rustix::stdio::stdout())
-    {
+    if !rustix::termios::isatty(rustix::stdio::stdout()) {
         return Err(Error::NotATty);
     }
+    let stdin_tty = rustix::termios::isatty(rustix::stdio::stdin());
     install_panic_hook();
     let mut lim = rustix::process::getrlimit(Resource::Memlock);
     if lim.current != lim.maximum {
@@ -99,6 +107,7 @@ pub fn harden() -> Result<Hardening, Error> {
     }
     Ok(Hardening {
         memlock_limit: lim.current,
+        stdin_tty,
     })
 }
 
@@ -111,30 +120,158 @@ pub fn install_panic_hook() {
 /// Writes `buf` to fd 2 by raw `write(2)`, ignoring errors. Never pass
 /// secret bytes.
 pub fn write_stderr(buf: &[u8]) {
-    write_all(rustix::stdio::stderr(), buf);
+    write_fd(rustix::stdio::stderr(), buf);
 }
 
-fn write_all(fd: BorrowedFd<'_>, mut buf: &[u8]) {
+/// Writes all of `buf` to `fd` by raw `write(2)`, retrying on `EINTR` and
+/// giving up on any other error (a vanished terminal cannot be reported
+/// to). No intermediate buffer: `buf` may be an arena slot.
+pub fn write_fd(fd: BorrowedFd<'_>, mut buf: &[u8]) {
     while !buf.is_empty() {
         match rustix::io::write(fd, buf) {
+            Err(Errno::INTR) => {}
             Ok(0) | Err(_) => return,
             Ok(n) => buf = buf.get(n..).unwrap_or_default(),
         }
     }
 }
 
-/// Reads from fd 0 by raw `read(2)` into `buf`, retrying on `EINTR`.
-/// Returns the number of bytes read (0 at end of file).
+/// One raw `read(2)` from `fd` into `buf` (which may be an arena slot).
+/// Returns 0 at end of file.
 ///
 /// # Errors
-/// [`Error::Read`] if `read(2)` fails.
-pub fn read_stdin(buf: &mut [u8]) -> Result<usize, Error> {
-    loop {
-        match rustix::io::read(rustix::stdio::stdin(), &mut *buf) {
-            Ok(n) => return Ok(n),
-            Err(Errno::INTR) => {}
-            Err(_) => return Err(Error::Read),
+/// The `read(2)` error; `EINTR` is returned, not retried, so that a signal
+/// can cancel a prompt.
+pub fn read_fd(fd: BorrowedFd<'_>, buf: &mut [u8]) -> Result<usize, Errno> {
+    rustix::io::read(fd, buf)
+}
+
+/// fd 0, for `import --from-stdin`.
+#[must_use]
+pub fn stdin() -> BorrowedFd<'static> {
+    rustix::stdio::stdin()
+}
+
+// ---- Terminal and signals (spec Sections 9.3, 11.1).
+
+/// Opens `/dev/tty` with `O_RDWR | O_CLOEXEC` (Section 11.1).
+///
+/// # Errors
+/// The `open(2)` error (`ENXIO` without a controlling terminal).
+pub fn open_tty() -> Result<OwnedFd, Errno> {
+    rustix::fs::open("/dev/tty", OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
+}
+
+/// Saved terminal settings (`termios`).
+pub struct TtyState(rustix::termios::Termios);
+
+/// Reads the terminal settings of `fd`.
+///
+/// # Errors
+/// The `tcgetattr` error.
+pub fn tty_state(fd: BorrowedFd<'_>) -> Result<TtyState, Errno> {
+    rustix::termios::tcgetattr(fd).map(TtyState)
+}
+
+/// Applies `state` to `fd`, with `ECHO` cleared unless `echo` (hidden
+/// input keeps `ICANON` and `ISIG`). `set_tty(fd, saved, true)` restores.
+///
+/// # Errors
+/// The `tcsetattr` error.
+pub fn set_tty(fd: BorrowedFd<'_>, state: &TtyState, echo: bool) -> Result<(), Errno> {
+    let mut t = state.0.clone();
+    if !echo {
+        t.local_modes.remove(rustix::termios::LocalModes::ECHO);
+    }
+    rustix::termios::tcsetattr(fd, rustix::termios::OptionalActions::Now, &t)
+}
+
+/// `poll(2)` for input on `fd`: `true` if it is readable (or hung up),
+/// `false` after `timeout_ms` (`None` waits without limit).
+///
+/// # Errors
+/// The `poll(2)` error; `EINTR` when a signal arrived.
+pub fn wait_readable(fd: BorrowedFd<'_>, timeout_ms: Option<u64>) -> Result<bool, Errno> {
+    let ts = timeout_ms.map(|ms| rustix::event::Timespec {
+        tv_sec: i64::try_from(ms / 1000).unwrap_or(i64::MAX),
+        tv_nsec: ((ms % 1000) * 1_000_000).try_into().unwrap_or(0),
+    });
+    let mut fds = [rustix::event::PollFd::from_borrowed_fd(
+        fd,
+        rustix::event::PollFlags::IN,
+    )];
+    Ok(rustix::event::poll(&mut fds, ts.as_ref())? > 0)
+}
+
+/// A signal recorded by the handler (Section 9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// SIGINT: cancel the current command.
+    Interrupt,
+    /// SIGTERM, SIGHUP, or SIGQUIT: orderly exit.
+    Terminate,
+    /// `memtest` only: SIGUSR1, which ends `__pause` (Section 5.8).
+    Resume,
+}
+
+/// The pending signal: 0 none, 1 interrupt, 2 terminate, 3 resume. The
+/// only global besides the allocator (T-ENG-3 permits atomics).
+static PENDING: AtomicU8 = AtomicU8::new(0);
+
+/// The handler only sets the atomic flag. Terminate is never overwritten.
+extern "C" fn on_signal(sig: libc::c_int) {
+    let v = match sig {
+        libc::SIGINT => 1,
+        libc::SIGUSR1 => 3,
+        _ => 2,
+    };
+    if v == 2 {
+        PENDING.store(2, Ordering::SeqCst);
+    } else {
+        let _ = PENDING.compare_exchange(0, v, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Installs the flag-setting handler for SIGINT, SIGTERM, SIGHUP, and
+/// SIGQUIT (and SIGUSR1 in `memtest` builds), without `SA_RESTART`, so a
+/// blocked `read` or `poll` returns `EINTR`.
+///
+/// # Errors
+/// [`Error::Signal`] if `sigaction` fails.
+pub fn install_signal_flag() -> Result<(), Error> {
+    let extra: &[libc::c_int] = if cfg!(feature = "memtest") {
+        &[libc::SIGUSR1]
+    } else {
+        &[]
+    };
+    for &sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
+        .iter()
+        .chain(extra)
+    {
+        // SAFETY: an all-zero `sigaction` is a valid value (no flags, so no
+        // SA_SIGINFO and no SA_RESTART); `on_signal` has the handler ABI and
+        // is async-signal-safe (one atomic store); the pointers are valid
+        // for the calls.
+        let rc = unsafe {
+            let mut sa: libc::sigaction = core::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&raw mut sa.sa_mask);
+            libc::sigaction(sig, &raw const sa, core::ptr::null_mut())
+        };
+        if rc != 0 {
+            return Err(Error::Signal);
         }
+    }
+    Ok(())
+}
+
+/// Takes the pending signal, if any, clearing the flag.
+pub fn take_signal() -> Option<Signal> {
+    match PENDING.swap(0, Ordering::SeqCst) {
+        1 => Some(Signal::Interrupt),
+        2 => Some(Signal::Terminate),
+        3 => Some(Signal::Resume),
+        _ => None,
     }
 }
 

@@ -1564,3 +1564,310 @@ needs it now. They remain the lever for `gen-words-t-gen-4-valid`
 **Local verification.** fmt; clippy `--all-targets` (default features);
 the `cfg(miri)` compile check of tests/gen.rs; both word-draw tests
 natively.
+
+## 2026-11-15 — M7: terminal, CLI, clipboard
+
+Started on the owner's go-ahead (2026-11-15), while M6 CI round 3 is
+still running. If that round fails, M6 is fixed first.
+
+### Owner decisions (2026-11-15)
+
+1. **stdin and stdout.** `/dev/tty` is opened first; exit 4 if that
+   fails. stdout must always be a terminal. A non-terminal stdin is
+   allowed only for `import --from-stdin`.
+2. **Rule 5 exception: `arboard` accepted, `zxcvbn` not.** See "Heap
+   copies" below. The strength check is written by hand and works in the
+   arena. The passphrase is strongly recommended; a chosen password stays
+   possible, with a warning.
+3. **Clipboard timeout default 10 s** (spec 9.1 says 20), because the
+   copied value sits on the unlocked heap inside `arboard` for that long.
+   The range 5–300 is unchanged.
+4. **T-CLIP-4 mock manager in Rust with x11rb.**
+5. **LOC caps raised:** `sys + secmem + alloc` 800 → 900, `term + clip`
+   350 → 450, `cli + main` 500 → 1,300, Total 3,200 → 4,500.
+
+**Spec edits these decisions need (the owner's; not made here):**
+Section 3 (LOC table; the `zxcvbn` row), 6.5 (the strength rule), 9.1
+(`--clip-timeout` default), 15.1 (the `strength` feature row).
+
+### Heap copies (rule 5 exceptions; rule 4 check of the pinned sources)
+
+- **`arboard` 3.7.0, accepted.** `Set::text` turns the borrowed value
+  into an owned `String` (`into_owned`, src/platform/linux/x11.rs and
+  wayland.rs) and keeps it in a process-global until it is replaced; its
+  X11 server thread serves it from there. `get_text` returns a heap
+  `String`. The zeroizing allocator wipes each copy when it is freed.
+  `clip` replaces the value by the empty string on expiry and on every
+  exit path, which frees the copy. The `String` from `get_text` is
+  compared in constant time with the `Clip` slot and dropped at once.
+  T-MEM-4 (M8) must scan with a value on the clipboard, and expect it
+  outside the arena only inside `arboard`'s buffers.
+- **`zxcvbn` 3.1.1, not used.** It copies the first 100 characters of the
+  password into a `String` and builds match lists of substrings. The
+  dependency and the `strength` feature are removed (`Cargo.toml`, both
+  lock files; 35 packages leave `Cargo.lock`, among them `chrono`,
+  `time`, `fancy-regex`, `itertools`, `bit-set`, and `bit-vec`). No other master-password
+  copy leaves the arena.
+- **Inherent, not a library:** the arguments of a one-shot command
+  (`pwv show <name>`) are in the kernel's argv block (`/proc/<pid>/cmdline`)
+  and in std's `args_os` vector, so entry names given that way are visible
+  to other processes. They are copied into the `Input` slot and used from
+  there. The README says to use a session for private names. Values and
+  passwords are never arguments.
+
+### Master-password policy (`cli::weakness`, `cli::strength_bits`)
+
+A chosen password needs at least 16 characters (the spec's rule for
+builds without `zxcvbn`) **and** an estimate of at least 46.5 bits
+(10^14 guesses, the spec's `zxcvbn` threshold). The estimate reads the
+password in place in `Pw1` and allocates nothing:
+
+- a run of 3 or more bytes that occurred earlier in the password: 1 bit;
+- a word of the embedded list (5–24 letters, any letter case, longest
+  match, binary search over the list in place): 11 bits, about a
+  2,000-word common vocabulary, far below the 17.65 bits of a random
+  list word;
+- any other character: log2 of its class (26 letters, 10 digits, 33
+  ASCII punctuation, 64 otherwise), or 1 bit if it repeats the previous
+  character, is its neighbour in code-point order or on a keyboard row,
+  or completes a character pair seen earlier.
+
+It is a heuristic. It bounds repeats, runs, keyboard walks, and word
+combinations; it knows no names, dates, or leet spellings, and no words
+shorter than 5 letters. That limit is why the passphrase is the default.
+Refused, for example: `password1password1`, `qwertyuiopasdfghjkl`,
+`correct horse battery`, 144 times `a`. A generated 6-word passphrase
+typed as a chosen password passes (66 bits by this count).
+
+**Flow.** "Use a generated passphrase? [Y/n]", default yes. Generated:
+shown once, Enter clears screen and scrollback, then it is typed back
+hidden and compared in constant time with the `Gen` slot (this is the
+second entry Section 6.5 asks for). Chosen: a warning, two hidden
+entries compared in constant time, then the policy. `--accept-weak-password`
+is an option of `init` and `passwd`; it also needs the typed sentence
+`I accept a weak master password`.
+
+### Structure
+
+- **`sys`** (+75 lines): `open_tty`, `tty_state` / `set_tty` (termios),
+  `wait_readable` (poll), `read_fd` (returns `EINTR`), `write_fd`,
+  `stdin`, and the signal flag: one `static AtomicU8`, set by a
+  `sigaction` handler without `SA_RESTART` (libc 0.2.191; one new
+  `unsafe` block, exercised by T-E2E-7). `harden` step 4 now requires
+  only stdout to be a terminal and records `stdin_tty`.
+- **`term`**: `Term` owns `/dev/tty` and the saved termios; `hide()`
+  returns the `EchoGuard` (the spec's `TermiosGuard`); `read_line` reads
+  by raw `read(2)` straight into a slot; `wait` is the poll primitive;
+  `sanitize` is pure and streams from the caller's slice.
+- **`clip`**: `Clip::copy` and `clear_if_unchanged`. Same-layer modules
+  may not use each other, so the deadline and the single poll loop are in
+  `cli` (`Session::prompt`).
+- **`cli`**: tokenizer, command table (`COMMANDS`, one row per command,
+  `#[rustfmt::skip]` so that it stays a table), parser, `gen` options,
+  strength, `doctor`, the `Session` context passed by reference (E1), and
+  one handler per command.
+- **Rule 7.** Handlers are `fn` pointers; no new trait, no generic, no
+  macro. `impl From<..> for Fail` are impls of a std trait, as `vault`
+  already has; `folded` returns `impl Iterator`.
+
+### Secrets in the CLI
+
+- A line is read into `Input` and tokenized **in place**: quotes and
+  escapes are removed by compacting bytes towards the front, and
+  arguments are byte ranges into the slot.
+- Arguments needed after a later prompt (which overwrites `Input`) are
+  parked in `Pw1` (entry name) and `Pw2` (field key). These slots are
+  free outside `init`, unlock, and `passwd`. This use is not in Section
+  5.2's table; it stays inside the arena.
+- A hidden value is entered twice: the first entry waits in the vault's
+  scratch half and is compared in constant time.
+- Every command ends with `tidy`: `Input`, `Pw1`, `Pw2`, `Gen`, and the
+  scratch half are wiped.
+- **Bug found by the first PTY run and fixed:** echo was turned off only
+  when the line was read, after the prompt and the wait. The kernel
+  echoes at typing time, so a password typed quickly was echoed. Echo now
+  goes off before the prompt is written. T-E2E-1 asserts that no typed
+  password is on the screen, with a positive control that echo is on.
+
+### Interpretations (rule 10)
+
+- **Tokenizer.** Separators are space and tab. A quote may start or end
+  inside an argument (`a"b c"d` is `ab cd`); `""` is an empty argument.
+  `\"` and `\\` are the only escapes, inside and outside quotes. At most
+  24 arguments. A bare `--` ends the options, so a name starting with
+  `--` can be addressed; without it such an entry (possible through
+  import) could never be shown or removed.
+- **One-shot arguments are not tokenized.** They are copied as they are.
+- **`sanitize`.** C0 and DEL: `\x1b`. C1 and the bidi overrides:
+  `\u{202e}`. A byte that is not UTF-8: `\xff`. LF is a C0 control, so a
+  multi-line value is shown with `\x0a`. A backslash is **not** escaped:
+  `reveal` must show a password exactly, so a literal `\x1b` in a value
+  looks like an escaped ESC. No injection follows from that.
+- **T-E2E-8.** The format refuses every control character in a name, a
+  key, and (except LF) a value, so an entry "named with ESC, BEL" cannot
+  exist. The test shows (a) that such input is refused and no raw ESC or
+  BEL reaches the terminal, and (b) that a stored U+202E, U+2066, U+202A
+  in a name, key, and value is displayed as an escape and never raw.
+- **Signals.** SIGINT cancels the current command (a guided `add` is
+  undone with `rm`, without a save). SIGTERM, SIGHUP, SIGQUIT, and
+  Ctrl-D end the session with exit code 0 ("exit cleanly").
+- **Idle timeout** runs at every prompt, including one-shot commands;
+  exit code 0 with "Locked after N s without input."
+- **Unlock** takes one attempt; a wrong password exits with code 2.
+- **`init`** is a one-shot command: a session needs a vault to start.
+- **Sensitivity.** `--plain` and `--sensitive` decide; otherwise a field
+  is sensitive if it is generated, was sensitive before, or its key is
+  in Section 9.3's list. In `add`, choosing `hidden` makes it sensitive.
+- **`gen` and `copy` without a clipboard** fail with exit code 4 and a
+  fixed message (no display), or "this build has no clipboard support"
+  (no `clipboard` feature). `gen --show` prints the value first.
+- **`import`.** "stdin must be a pipe" is checked as "not a terminal".
+  A refusal names the constraint and the entry index, never content.
+- **`passwd`** verifies the current password by deriving its KEK and
+  unwrapping the DEK into `NewDek` (wiped at once): one extra key
+  derivation. Salt, DEK, and both nonces rotate; the vault ID stays.
+- **`doctor`.** "KDF memory lockable" and "ptrace scope" warn; "Arena
+  lockable", "Swap", "Hibernation", "Core dumps", and a refused vault
+  location fail (exit 1). "Clipboard history" is informational. A swap
+  device counts as protected only if it is `/dev/zram*`, or `/dev/dm-*`
+  with a `CRYPT-` UUID. The checks are a pure function over `Facts`.
+- **Over-long input** is drained and refused. The kernel's canonical
+  mode already limits a line to 4,095 bytes, so this is reachable for
+  the 1 KiB password slots only (tested there).
+- **`__pause`** (`memtest`, Section 5.8) blocks until SIGUSR1. The pause
+  before exit that T-MEM-4 needs is M8 work.
+
+### Clipboard (verified in `arboard` 3.7.0; tests run only in CI)
+
+- `Set::exclude_from_history()` adds `x-kde-passwordManagerHint` with the
+  value `secret`. When the owned data carries that hint, `arboard`'s
+  `Drop` does **not** hand it to a clipboard manager; it gives up the
+  selection instead. `clip` clears with the empty string, also with the
+  hint, before the `Clipboard` is dropped. So at exit a manager is asked
+  for nothing.
+- **T-CLIP-4** therefore asserts: the manager never receives the copied
+  value, anything it receives at exit is empty, and the clipboard is
+  empty afterwards. A positive control (an ordinary `arboard` client
+  that exits owning a value) proves the mock manager does receive
+  hand-overs.
+- **Not run locally.** The sandbox has no X server and no `xclip`.
+  `tests/clip.rs` compiles in every configuration and returns at once
+  without `DISPLAY`. CI sets `PWV_REQUIRE_X11=1`, which makes a missing
+  display a failure (the `PWV_FOREIGN_DIR` pattern of T-STORE-1). The
+  first `e2e` run on CI is the first real run of T-CLIP-1 to T-CLIP-4,
+  of the clipboard half of T-E2E-6, and of the x11rb mock manager.
+
+### Existing tests
+
+- `harden_refuses_non_tty_with_exit_4` is unchanged and passes.
+- **T-MEM-5** now starts `pwv init` in a scratch home, because a bare
+  `pwv` exits at once without a vault. Every assertion is unchanged.
+- New: `harden_refuses_non_tty_stdout_for_every_command`.
+- The PTY harness (`tests/common/pty.rs`) never prints the screen.
+  ptyprocess starts children with echo off, which would make "not
+  visible" checks vacuous, so the child runs `stty echo` first.
+
+### Tests added
+
+- `tests/e2e.rs` (26): T-E2E-1 (5 tests), -2, -3, -4, -5 (3), -6, -7 (2),
+  -8, -9, -10, -11, -12; the binary-level T-CRY-2 (same bytes on screen
+  and exit code 2 for a wrong password and a damaged payload), T-STORE-5
+  (rollback prompt: only `yes` continues, the counter never regresses),
+  T-STORE-9 (read-only commands leave inode, mtime, size, directory, and
+  state file unchanged; positive control); one-shot mode, `gen`,
+  `doctor`, `copy` without a clipboard. Vault content is checked by
+  decrypting the file independently of the binary.
+- `tests/cli.rs` (21): tokenizer table, limits, every truncation, and
+  properties (2,000 cases); the parser for every command and option;
+  `gen` options; sanitize for every unsafe character, properties, and
+  truncation; default sensitivity; `ls` matching; strength; `doctor`;
+  exit codes; the fuzz seeds.
+- `tests/clip.rs` (6, CI only): T-CLIP-1 to -4, T-E2E-6's clipboard
+  half, clearing on SIGTERM.
+- **T-FUZZ-4** `fuzz_tokenizer` (tokenizer, command and `gen` option
+  parsers, strength, `ls` matching; re-quoting round trip) and
+  **T-FUZZ-5** `fuzz_sanitize` (output is UTF-8 with no control or bidi
+  override; clean input is unchanged). Local run, stable, `-s none`,
+  60 s each: 1,124,637 and 7,092,554 runs, clean.
+- Two defects found by the new unit tests and fixed: a swap *file* named
+  `zram...` counted as zram, and `letmeinletmeinletmein` passed the
+  strength check (now caught by the repeated-run rule).
+
+### Section 13 rows that M7 makes true
+
+S5 (T-E2E-1), S6 (T-E2E-3, T-E2E-4), S9 (T-E2E-6), B1 (T-E2E-1, -2),
+B3 and B5 (T-E2E-5), B6 (T-E2E-5, with T-VAULT-1), B7 (T-E2E-8), B8
+(T-E2E-6, -7, T-FUZZ-4, -5), B10 (T-E2E-3), the T-FUZZ-4 part of B2, and
+the T-E2E-9 part of S1 all pass locally. **S7 (T-CLIP-1 to -4) is
+written but has not run anywhere yet**; it is true only once CI passes.
+
+### Section 15.5 checklist
+
+- New places for secrets outside the arena: `arboard`'s copies (accepted
+  exception) and one-shot argv (inherent). Nothing else.
+- New `unsafe`: one block (`sigaction`), in `sys`, with `// SAFETY:`.
+- New parsing paths: tokenizer, command parser, `gen` options: fuzz
+  target T-FUZZ-4 and truncation tests. `sanitize`: T-FUZZ-5.
+- New disk writes: none outside `store`.
+- LOC: see below; one cap is exceeded. Section 13: as above.
+- Coverage is M9.
+
+### LOC
+
+| Group | LOC | Cap |
+| --- | --- | --- |
+| `sys + secmem + alloc` | 699 | 900 |
+| `crypto + format` | 696 | 750 |
+| `store` | 409 | 450 |
+| `vault` | 486 | 500 |
+| `gen` | 268 | 300 |
+| `term + clip` | 275 | 450 |
+| `cli + main` | 1,605 | 1,300 (**over by 305**) |
+| Total | 4,438 | 4,500 |
+
+The estimate given to the owner (1,400–1,700 for all of M7) was close for
+the total (1,841 added), but `cli` took more of it than expected and
+`term + clip` less. T-ENG-6 fails locally until the cap is decided.
+Request: `cli + main` 1,700, and Total 4,800 to leave room for M8's
+`__pause` and M9 fixes. Nothing was cut to fit.
+
+### Not verifiable in the sandbox
+
+T-CLIP and the mock manager (no X server); the ASan builds of the two new
+fuzz targets (stable only here); `cargo deny` and `cargo audit` after the
+lock-file change (no advisory database; a `deny.toml` skip or ignore
+that matched only a removed package may now be reported as unused);
+T-MEM-5's `coredumpctl` clause.
+
+### Local gate result (2026-11-15)
+
+- `cargo test --locked`, all green: default 528 s, `memtest` 502 s,
+  `testkdf` 508 s, `memtest,testkdf` 515 s, release 80 s. `tests/e2e`
+  takes about 37–41 s (T-E2E-6 waits 31 s).
+- The first release run failed in `t_store_3_kill_loop` on its
+  `none > 0` guard: the known local-only flake of the M4 CI round 2
+  entry (release on tmpfs), not an M7 change. The full release rerun and
+  four more runs of `tests/store` passed.
+- `--no-default-features`: `tests/cli`, `tests/e2e`, `tests/clip` green.
+- fmt (crate and `fuzz/`); clippy `-D warnings` in six configurations
+  (default, all features, no default features, `memtest`, `testkdf`,
+  `memtest,testkdf`) and on the fuzz crate; the six `cfg(miri)` compile
+  checks; `tests/eng`: all clean.
+- **T-ENG-6 fails**: `cli + main` 1,605 against 1,300 (see LOC).
+
+### After hand-over (2026-11-15): caps and spec
+
+- **LOC caps (owner, spec Section 3 table):** `cli + main` 1,700 and
+  Total 4,800. The owner left `sys + secmem + alloc` at 800 and
+  `term + clip` at 350 in the table (not the 900 and 450 discussed
+  earlier); usage is 699 and 275, so both hold. `scripts/loc_budget.py`
+  matches the table, and T-ENG-6 passes: total 4,438 / 4,800.
+- **Spec edited at the owner's request (minimal):** Section 3 (the
+  `zxcvbn` row removed), 5.1 step 4 (stdin may be a pipe for
+  `import --from-stdin`), 5.3 (no `zxcvbn` example), 6.5 (16 characters
+  and a built-in estimate of 10^14 guesses, computed in the arena; the
+  warning), 9.1 and 11.3 (`--clip-timeout` default 10 s), 13 (S5 row),
+  15.1 (the `strength` row removed).
+- **The M7 CI round the owner started** was pushed before the
+  `loc_budget.py` change, so its `lint` job is expected to fail at
+  T-ENG-6 (1,605 against the old 1,300) for that reason alone.

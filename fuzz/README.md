@@ -4,8 +4,10 @@
 T-FUZZ-2 `fuzz_body` (M2), T-FUZZ-3 `fuzz_open` (M3; full unlock with
 `testkdf` parameters, and save-then-unlock of fuzzed bodies), T-FUZZ-6
 `fuzz_import` (M5; two bodies imported in turn, the second in abort or
-suffix mode, checked against an independent merge oracle). T-FUZZ-4 and
-T-FUZZ-5 arrive in M7.
+suffix mode, checked against an independent merge oracle), T-FUZZ-4
+`fuzz_tokenizer` (M7; REPL tokenizer, command and `gen` option parsers,
+and the master-password strength estimate) and T-FUZZ-5 `fuzz_sanitize`
+(M7; display sanitisation).
 
 `fuzz_open` needs the lowered KDF floor: add `--features testkdf`
 (`cargo +nightly fuzz run --features testkdf fuzz_open ...`). The other
@@ -27,6 +29,7 @@ corpus. On stable Rust, add `-s none` (no AddressSanitizer).
 `corpus/<target>/seed-*` are generated and checked by
 `cargo test --test format corpus` and, for `fuzz_open` (from the golden
 vault `v1-small.pwv`), `cargo test --features testkdf --test crypto golden`,
+for `fuzz_tokenizer` and `fuzz_sanitize`, `cargo test --test cli corpus`,
 and for `fuzz_import`, `cargo test --test vault corpus`
 (`PWV_WRITE_CORPUS=1` to regenerate).
 Every crash becomes a regression unit test in `tests/` before it is fixed.
