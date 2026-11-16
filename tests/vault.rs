@@ -718,35 +718,76 @@ fn cases(native: u32) -> Config {
 
 // ------------------------------------------------------------ T-VAULT-1
 
+/// The segments of 10 operations that part `j` of `n` runs (0-based `j`):
+/// contiguous, together exactly `0..segments`. A segment's cost under Miri
+/// grows with the body, so segment `k` weighs `k + 1` and goes to the part
+/// that holds the middle of its weight.
+fn t_vault_1_part(segments: usize, j: usize, n: usize) -> std::ops::Range<usize> {
+    let total: usize = (1..=segments).sum();
+    let part = |k: usize| (n * (k * (k + 1) + k + 1)) / (2 * total).max(1);
+    let lo = (0..segments).find(|&k| part(k) >= j).unwrap_or(segments);
+    let hi = (0..segments).find(|&k| part(k) > j).unwrap_or(segments);
+    if j + 1 == n { lo..segments } else { lo..hi }
+}
+
+/// `PWV_T_VAULT_1_PART=j/n` (1-based `j`): run only part `j` of every case
+/// (CI splits the long Miri case across jobs; DESIGN_NOTES, M8).
+fn t_vault_1_part_env() -> Option<(usize, usize)> {
+    let v = std::env::var("PWV_T_VAULT_1_PART")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    let (j, n) = v.split_once('/').expect("PWV_T_VAULT_1_PART is j/n");
+    let (j, n): (usize, usize) = (j.parse().expect("j"), n.parse().expect("n"));
+    assert!((1..=n).contains(&j), "PWV_T_VAULT_1_PART: 1 <= j <= n");
+    Some((j - 1, n))
+}
+
 /// One T-VAULT-1 case: an empty vault is created and saved, then the
 /// operations run in segments of 10. Each segment reopens the vault from
 /// disk (store open, DEK unwrap, decrypt), checks it against the reference,
 /// applies its operations to both sides comparing the result and the state
-/// after every one, then seals and saves.
+/// after every one, then seals and saves; the file of the last segment is
+/// reopened and checked once more.
+///
+/// With `part`, only that part's segments run on the implementation. The
+/// file is the only state that crosses a segment boundary, so a part that
+/// starts at segment `k` applies the earlier operations to the reference
+/// alone and saves the reference's canonical body (unique, so the bytes
+/// the full run would reopen there) as its starting file. Every operation
+/// is still applied to both sides and checked, in exactly one part.
 fn t_vault_1_case(
     keys: &Keys<'_>,
     size: usize,
     fill: usize,
     ops: &[Op],
     seen: &RefCell<BTreeMap<String, usize>>,
+    part: Option<(usize, usize)>,
 ) -> Result<(), TestCaseError> {
     let fill = if size == MIN_ARENA { fill } else { 0 };
     let mut arena = SecureArena::new(size, true).expect("arena");
     let mut disk = Disk::new();
     let mut h = keys.h0.clone();
+    let segments = ops.chunks(10).count();
+    let run = part.map_or(0..segments, |(j, n)| t_vault_1_part(segments, j, n));
+    let mut r = filler(fill);
+    let mut at = run.start * 10;
     {
         let s = arena.slots().expect("slots");
         prop_assert_eq!(s.vault_a.capacity(), s.vault_b.capacity());
-        let mut m = if fill == 0 {
+        let cap = s.vault_b.capacity();
+        for op in ops.get(..at).unwrap_or(ops) {
+            let act = resolve(&r, op);
+            let _ = ref_apply(&mut r, &act, cap);
+        }
+        let mut m = if at == 0 && fill == 0 {
             Model::new(s.vault_a, s.vault_b).expect("empty model")
         } else {
-            model_of(s.vault_a, s.vault_b, &filler(fill))
+            model_of(s.vault_a, s.vault_b, &r)
         };
         disk.save(m.seal(keys.dek, &mut h).expect("first save"));
     }
-    let mut r = filler(fill);
-    let mut at = 0;
-    for seg in ops.chunks(10).chain([&[][..]]) {
+    let mine = ops.chunks(10).skip(run.start).take(run.len());
+    for seg in mine.chain([&[][..]]) {
         let file = disk.reopen();
         let mut s = arena.slots().expect("slots");
         let opened = vault::open_with_kek(&file, keys.kek, &mut s.dek, &mut s.vault_a);
@@ -798,6 +839,27 @@ fn filler(n: usize) -> Ref {
         .collect()
 }
 
+/// The parts of a split T-VAULT-1 case cover every segment exactly once,
+/// in order, for every split CI could use.
+#[test]
+fn t_vault_1_parts_cover_every_segment_once() {
+    for segments in 0..=40 {
+        for n in 1..=8 {
+            let mut next = 0;
+            for j in 0..n {
+                let r = t_vault_1_part(segments, j, n);
+                assert_eq!(r.start, next, "{segments} segments, part {j}/{n}");
+                assert!(r.end >= r.start && r.end <= segments);
+                next = r.end;
+            }
+            assert_eq!(next, segments, "{segments} segments, {n} parts");
+        }
+    }
+    // The CI split of seed 1 (153 operations, 16 segments) into 4 parts.
+    let parts: Vec<_> = (0..4).map(|j| t_vault_1_part(16, j, 4)).collect();
+    assert_eq!(parts, [0..8, 8..11, 11..14, 14..16]);
+}
+
 #[test]
 fn t_vault_1_model_matches_reference() {
     let seen = RefCell::new(BTreeMap::new());
@@ -813,15 +875,16 @@ fn t_vault_1_model_matches_reference() {
             0usize..=if cfg!(miri) { 0 } else { 30 },
             prop::collection::vec(op(), 0..=200),
         );
+        let part = t_vault_1_part_env();
         let mut runner = TestRunner::new(cases(256));
         let res = runner.run(&strategy, |(size, fill, ops)| {
-            t_vault_1_case(keys, size, fill, &ops, &seen)
+            t_vault_1_case(keys, size, fill, &ops, &seen, part)
         });
         if let Err(e) = res {
             panic!("T-VAULT-1: {e}");
         }
     });
-    if cfg!(miri) {
+    if cfg!(miri) || t_vault_1_part_env().is_some() {
         return;
     }
     // Non-vacuity: every operation succeeded somewhere, and every error

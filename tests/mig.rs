@@ -281,8 +281,11 @@ impl Rig {
                     "the legacy program wrote no fixture"
                 );
                 let head = std::fs::read(&out).expect("fixture");
+                // python-gnupg 0.5.7 `encrypt_file` armors by default; a
+                // binary OpenPGP packet would start with bit 7 set.
+                let armored = head.starts_with(b"-----BEGIN PGP MESSAGE-----");
                 assert!(
-                    head.first().is_some_and(|b| b & 0x80 != 0),
+                    armored || head.first().is_some_and(|b| b & 0x80 != 0),
                     "the fixture is not an OpenPGP message"
                 );
             }

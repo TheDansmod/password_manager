@@ -61,8 +61,11 @@ mod scan {
         hits: Vec<Hit>,
         /// Bytes read successfully.
         read: usize,
-        /// Readable mappings that could not be read (by name).
+        /// Readable mappings with unreadable pages that are not guard
+        /// pages: perms, name, and page counts.
         unread: Vec<String>,
+        /// Guard pages skipped.
+        guards: usize,
     }
 
     /// A canary and its label for messages.
@@ -107,6 +110,20 @@ mod scan {
             .collect()
     }
 
+    const PAGE: usize = 4096;
+
+    /// Whether the page at `addr` is a guard region (`madvise(
+    /// MADV_GUARD_INSTALL)`, Linux 6.13): `pagemap` bit 58
+    /// (`PM_GUARD_REGION`). Such a page faults on every access, the
+    /// process's own included, so it holds no data. glibc 2.42 places
+    /// thread-stack guards this way, inside the stack's `rw-p` mapping
+    /// (DESIGN_NOTES, M8 CI round 1).
+    fn is_guard(pagemap: &std::fs::File, addr: usize) -> bool {
+        let mut e = [0u8; 8];
+        let at = (addr / PAGE * 8) as u64;
+        pagemap.read_exact_at(&mut e, at).is_ok() && u64::from_le_bytes(e) >> 58 & 1 == 1
+    }
+
     /// Reads every readable mapping of `pid` and searches it for every
     /// canary. One pass per mapping: a table of first bytes selects the
     /// positions worth comparing.
@@ -118,11 +135,14 @@ mod scan {
         for c in canaries {
             first[usize::from(c.bytes[0])] = true;
         }
+        let pagemap =
+            std::fs::File::open(format!("/proc/{pid}/pagemap")).expect("open pagemap (parent?)");
         let mut out = Scan {
             maps: Vec::new(),
             hits: Vec::new(),
             read: 0,
             unread: Vec::new(),
+            guards: 0,
         };
         for (i, m) in maps.iter().enumerate() {
             if !m.perms.starts_with('r') {
@@ -130,10 +150,31 @@ mod scan {
             }
             let mut data = vec![0u8; m.end - m.start];
             if mem.read_exact_at(&mut data, m.start as u64).is_err() {
-                out.unread.push(m.path.clone());
-                continue;
+                // Page by page: only guard pages may fail (see `is_guard`).
+                let (mut bad, mut ok) = (0, 0);
+                for (k, page) in data.chunks_mut(PAGE).enumerate() {
+                    let addr = m.start + k * PAGE;
+                    if mem.read_exact_at(page, addr as u64).is_ok() {
+                        ok += page.len();
+                    } else if is_guard(&pagemap, addr) {
+                        out.guards += 1;
+                    } else {
+                        bad += 1;
+                    }
+                }
+                out.read += ok;
+                if bad > 0 {
+                    out.unread.push(format!(
+                        "{} {:?}, {} of {} pages unreadable and not guard pages",
+                        m.perms,
+                        m.path,
+                        bad,
+                        data.len() / PAGE
+                    ));
+                }
+            } else {
+                out.read += data.len();
             }
-            out.read += data.len();
             for (at, b) in data.iter().enumerate() {
                 if !first[usize::from(*b)] {
                     continue;
@@ -189,10 +230,10 @@ mod scan {
                     "no readable mapping named {name}"
                 );
             }
-            for name in &self.unread {
+            for what in &self.unread {
                 assert!(
-                    name.starts_with("[v"),
-                    "a readable mapping could not be read: {name:?}"
+                    what.contains("\"[v"),
+                    "a readable mapping could not be read: {what}"
                 );
             }
         }
@@ -463,6 +504,64 @@ mod scan {
                 _ => assert!(p.alive_after(Duration::from_secs(25)), "idle too early"),
             }
             assert_wiped(&mut p, &canaries(&[("P", P), ("C1", C1)]));
+        }
+    }
+
+    /// The scanner skips a guard page inside a readable mapping, and only
+    /// that page: a canary on each side of it is still found. The child
+    /// is Python (ctypes `mmap` and `madvise`), a child of this process.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests spawn children; Section 5.7 binds the binary only"
+    )]
+    fn scan_skips_guard_pages_and_nothing_else() {
+        use std::io::{BufRead, Write};
+        const CHILD: &str = r#"
+import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+a = libc.mmap(None, 3 * 4096, 3, 0x22, -1, 0)
+for page in (0, 2):
+    ctypes.memmove(a + page * 4096 + 100, b"CANARY-mem-guard-test", 21)
+ok = libc.madvise(a + 4096, 4096, 102) == 0  # MADV_GUARD_INSTALL
+print(f"ready {a}" if ok else "unsupported", flush=True)
+sys.stdin.read()
+"#;
+        let mut child = std::process::Command::new("python3")
+            .args(["-I", "-c", CHILD])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("python3");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("stdout"))
+            .read_line(&mut line)
+            .expect("ready line");
+        let pid = i32::try_from(child.id()).expect("pid");
+        let base: Option<usize> = line
+            .trim()
+            .strip_prefix("ready ")
+            .map(|a| a.parse().expect("addr"));
+        let s = base.map(|_| scan(pid, &canaries(&[("guard test", "CANARY-mem-guard-test")])));
+        let _ = child.stdin.take().expect("stdin").write_all(b"");
+        let _ = child.wait();
+        let Some(s) = s else {
+            // A kernel before 6.13 has no guard regions: nothing to test.
+            assert!(line.trim() == "unsupported", "child failed");
+            return;
+        };
+        assert_eq!(s.guards, 1, "exactly the guard page is skipped");
+        let other: Vec<_> = s.unread.iter().filter(|u| !u.contains("\"[v")).collect();
+        assert!(other.is_empty(), "unreadable: {other:?}");
+        let base = base.expect("base");
+        for at in [base + 100, base + 2 * PAGE + 100] {
+            assert!(
+                s.hits.iter().any(|h| h.canary == 0 && h.addr == at),
+                "a canary next to the guard page was missed"
+            );
         }
     }
 

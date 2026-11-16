@@ -2052,7 +2052,8 @@ is fixed first.
 4. **The clipboard handle is dropped at every expiry** (see "Clipboard"
    below).
 
-**Spec edits these decisions need (the owner's; not made here):** 12.1
+**Spec edits these decisions need** (made on 2026-11-16 at the owner's
+request; see "M8 CI round 1"): 12.1
 (format, arguments, gpg, no `cryptography`, steps 3 and 4), 12.2 (order:
 read, then unlock), 12.3 (legacy file names), 14.12 T-MIG-2 (the pickle
 is given as the vault file and as the decrypted content; no salt file),
@@ -2204,3 +2205,108 @@ Others unchanged. `tools/` and tests are not counted.
   `loc_budget.py`: all clean.
 - `tests/mem` takes about 34 s (the idle exit waits 30 s); `tests/mig`
   about 3 s with the stand-in.
+
+## 2026-11-16 — M7 CI round 2: M7 gate green on CI
+
+Every job passed (owner's report, 2026-11-16). **The M7 gate is passed.**
+The runner loss of round 1 did not recur; its cause stays unestablished
+(the M7 CI round 1 entry). `scripts/ci_guard.sh` stays for now.
+
+Timings: `test` 46m38, `e2e` 6m19, `lint` 2m50, `supply` 5m10,
+`coredump` 1m00, `durability` 3m24, `compat` 8 s, `fuzz-smoke` 1m48 to
+2m13. Miri: `vault-model-t-vault-1-case-1` 5h17m23, `-case-2` 8m49,
+`vault-model-t-vault-2` 1h11m34, `vault-model` 8m56, `crypto-vault` 9m32,
+`format` 6m39, `format-10000-entries` 9m45, `format-testkdf` 17m04, `gen`
+2m31, `gen-words-t-gen-4-valid` 1h18m49, `gen-words-word-draw` 1h17m43,
+`gen-words-word-draw-ends` 17m54, `gen-words-os-bytes` 11m52,
+`gen-words-entropy-known` 11m37, `gen-words-rng-failure` 15m40,
+`gen-words-passphrase-too-long` 13m42.
+
+Caps (3x the slowest measurement): `gen-words-word-draw` 230 → 234,
+`gen-words-passphrase-too-long` 31 → 42; all others still hold.
+
+## 2026-11-16 — M8 CI round 1: a masked test failure; T-VAULT-1 split
+
+**Result (owner's report).** `e2e` failed after 1m27, in "M8 gate by
+name": `missing: scan::t_mem_4_canary_scan_mid_session_and_after_lock`.
+The step that ran the tests was green.
+
+**A CI defect, older than M8.** Steps without `shell:` run under GitHub's
+default `bash -e {0}`, without `pipefail`. So `cargo test ... | tee m8.txt`
+had the status of `tee`, and the failing test passed its step; only the
+by-name check noticed. The same pattern is in the M4–M7 gate steps and in
+the M7 `e2e` test steps: until now a failing test there that is not listed
+by name would not have failed CI. (All those runs were green in fact: each
+listed test was found `ok`, and the unlisted ones are in `test`, which does
+not pipe.) **Fix:** `defaults: run: shell: bash` for the whole workflow
+(`bash -eo pipefail`); the one pipeline that could fail for a harmless
+reason under `pipefail` (`gpg --version | head -1`, SIGPIPE) is now
+`sed -n 1p`.
+
+**The test failure (owner's log, 2026-11-16).** Both T-MEM-4 scans
+failed in the scanner's completeness check (`tests/mem.rs:193`, "a
+readable mapping could not be read: \"\""), not in a canary assertion.
+Diagnosis:
+
+- The canary test's first scan (after unlock, before any `copy`) must
+  have passed, since it runs the same check first; the failing scan comes
+  after `copy`, which starts `arboard`'s X11 server thread. The other test
+  scans only after the wipe, when that thread has ended but glibc keeps
+  its stack mapped for reuse. Locally there is no display, so no thread.
+- glibc 2.42 (Ubuntu 26.04; the sandbox has 2.36) places a thread
+  stack's guard page **inside** the stack's anonymous `rw-p` mapping with
+  `madvise(MADV_GUARD_INSTALL)` (Linux 6.13), instead of a separate
+  `---p` mapping. Such a page faults on any access: `/proc/<pid>/mem`
+  returns `EIO`, so reading the whole mapping failed.
+- Measured in the sandbox (its kernel supports guard regions; a ctypes
+  probe): a guard page inside a 4-page `rw-p` mapping, `/proc/self/mem`
+  `EIO` for that page only, and `pagemap` bit 58 (`PM_GUARD_REGION`) set
+  for that page only.
+
+**Fix (test only, rule 2: nothing weakened).** A mapping that cannot be
+read whole is read page by page; a page may be skipped only if `pagemap`
+marks it as a guard region (it can hold no data: the process faults on
+it too). Any other unreadable page still fails the scan, now naming the
+mapping's permissions, name, and the count of such pages. New test
+`scan_skips_guard_pages_and_nothing_else`: a child process installs a
+guard page between two pages holding a canary; the scanner must skip
+exactly one page and find both canaries at their addresses. Negative
+control: with the wrong pagemap bit, it fails.
+
+**Not run on CI:** `cargo test` stops at the first failing test binary,
+so `tests/mig.rs` (the real-gpg half of T-MIG) did not run in this round.
+The step now uses `--no-fail-fast`. The clipboard branch of T-MEM-4 has
+still never completed: a copy of the clipboard value left on `arboard`'s
+thread stack would now be found (glibc does not wipe cached stacks).
+
+**T-VAULT-1 under Miri split in four (owner's request: only if no test is
+weakened).** The case with seed 1 (153 operations, 16 segments of 10)
+ran 5h09m44 to 5h32m29 in one job, against the 360 min limit.
+
+- The implementation reloads its state from the file at the start of
+  every segment (`open_with_kek` into `vault_a`), so the saved file is the
+  only state that crosses a segment boundary.
+- `PWV_T_VAULT_1_PART=j/n` runs part `j`: the earlier operations are
+  applied to the reference model alone (cheap), the reference's canonical
+  body is sealed as the starting file (canonical form is unique, so these
+  are the bytes the full run would reopen there), and the part's own
+  segments then run with every check unchanged, ending with the reopen
+  of its last file.
+- So each operation is applied to both sides and checked in exactly one
+  part, and every file the implementation saves is reopened and checked.
+  The added starting save is extra coverage. Without the variable
+  (natively, and in every other job) nothing changes.
+- Segment `k` weighs `k + 1` (later segments hold bigger bodies): seed 1
+  splits into segments 0–7, 8–10, 11–13, 14–15.
+- New test `t_vault_1_parts_cover_every_segment_once` (native): for up to
+  40 segments and 1 to 8 parts, the parts are contiguous and cover every
+  segment once; and the CI split above is pinned.
+- Checked natively: all four parts pass with 256 cases each; a planted
+  defect (`unset` of a 3-byte key does nothing) fails every part.
+- CI: four jobs `vault-model-t-vault-1-case-1-part-1` .. `-4`, the variable
+  forwarded through Miri isolation, provisional caps 350.
+
+**Spec edited (owner's request, minimal):** 11.3 steps 1 and 3 (drop the
+`Clipboard` at expiry), 12 intro, 12.1 (heading, steps 1, 3, 4, 5), 12.2
+steps 1–2 (read, then unlock), 12.3 (legacy file names), 13 row S2, 14.12
+T-MIG-2.
