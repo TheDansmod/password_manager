@@ -2310,3 +2310,246 @@ ran 5h09m44 to 5h32m29 in one job, against the 360 min limit.
 `Clipboard` at expiry), 12 intro, 12.1 (heading, steps 1, 3, 4, 5), 12.2
 steps 1–2 (read, then unlock), 12.3 (legacy file names), 13 row S2, 14.12
 T-MIG-2.
+
+## 2026-11-16 — M8 CI round 2: M8 gate green on CI
+
+Every job passed (owner's report and run-time screenshots, 2026-11-16).
+**The M8 gate is passed:** T-MEM-4 (including its clipboard branch under
+`xvfb-run`, for the first time), T-MIG-1 .. T-MIG-3 with the real `gpg`
+and a fixture written by the original `encrypted_pw_mgr.py`, and T-E2E-10
+(including `t_e2e_10_import_reads_the_pipe_before_asking_for_the_master_password`,
+first run on CI). `test` also passed under `pipefail`, so no failure had
+been masked there. Section 13 rows **S2** (T-MIG-2) and **S10** (T-MEM-4)
+are now verified on CI; S7 (T-CLIP-1 .. -4) was verified in M7 CI round 2.
+
+Timings: `test` 49m39, `e2e` 6m41, `lint` 2m53, `supply` 5m19,
+`coredump` 1m11, `durability` 4m07, `compat` 10 s, `fuzz-smoke` 1m53 to
+2m17. Miri: `vault-model-t-vault-1-case-1-part-1` 46m30, `-part-2`
+1h28m23, `-part-3` 3h03m16, `-part-4` 1h46m54, `-case-2` 6m41,
+`vault-model-t-vault-2` 18m46, `vault-model` 11m35, `crypto-vault` 7m45,
+`format` 9m38, `format-10000-entries` 7m16, `format-testkdf` 26m13, `gen`
+2m09, `gen-words-t-gen-4-valid` 2h01m12, `gen-words-word-draw` 58m43,
+`gen-words-word-draw-ends` 15m19, `gen-words-os-bytes` 10m30,
+`gen-words-entropy-known` 8m52, `gen-words-rng-failure` 10m27,
+`gen-words-passphrase-too-long` 6m54. Total runner time 13h49m30.
+
+Caps (3x the slowest measurement): `test` 144 → 149, `e2e` 25
+(provisional) → 21, `format-testkdf` 61 → 79, `vault-model` 34 → 35,
+`durability` 11 → 13; T-VAULT-1 parts 1, 2, 4 → 140, 266, 321. Part 3
+stays at 350: 3x does not fit under GitHub's 360 min limit (the same
+exception as `gen-words-t-gen-4-valid`).
+
+**The T-VAULT-1 split is uneven.** The parts sum to 7h05 against 5h17 for
+the whole case in M7 round 2. Per unit of the `k + 1` weight model the
+parts cost 1.3, 2.9, 4.7 and 3.4 min, so the model underweights later
+segments, and segments 11–13 of seed 1 seem to be the costly ones (the
+operations are random; one segment may be dominated by a large import or
+by bigger values). Part 3 has 1.9x headroom against its cap, which is the
+largest runner-speed spread seen between rounds (M7 CI round 1). Not
+changed in this entry; options are put to the owner (M9 decisions).
+
+## 2026-11-16 — M9 started: inventory and tool checks
+
+The owner gave the go-ahead for M9 on 2026-11-16. Done before the M9
+decisions (signing, triggers, badges, T-PERF-1, T-SAN-1, T-MUT-1, aarch64,
+rule-12 review, `ci_guard.sh`) are settled:
+
+**Section 14 inventory: `scripts/test_ids.py`.** One row per test ID: the
+milestone of its gate (Section 16) and its evidence, which is a list of
+`#[test]` functions, a CI job whose success is the result (clippy, fuzzing,
+Miri, `supply`, `coredump`), or "to do". `--check` fails if a named test
+function does not exist (or, with `--spec`, if the table and Section 14
+disagree); it also lists the named tests that no gate-by-name step greps.
+`--markdown` prints the table; `--logs` turns test logs into a
+pass/fail/not-run verdict per ID, for the coverage report's item 5
+(Section 14.13). Kept as a script, not a table here, so the report and the
+inventory cannot drift. `lint` runs `--check`.
+
+- Locally against the spec: 81 IDs, table and spec agree, every named
+  test exists. Negative control: an invented ID and function both fail.
+- **12 IDs are not implemented:** T-STORE-8, T-ENG-7, T-SAN-1, T-MUT-1,
+  T-COV-1 .. T-COV-6, T-REPRO-1, T-PERF-1.
+- **24 implemented IDs are not checked by name** (their 57 tests run in
+  `test`/`lint`, and a failure fails CI, but nothing proves they ran):
+  T-KAT-1, -2, T-COMPAT-1, T-FMT-1 .. -4, T-CRY-1 .. -6, T-MEM-1, -2, -3,
+  -5, -6, -7, the seed test of T-FUZZ-3, T-ENG-2, -3, -4; T-STORE-1's
+  vfat test is checked by its own `1 passed` grep. "Every test ID green"
+  (the M9 gate) needs them listed. Plan: tee each `test` configuration's
+  output to a log, check names against those logs (no reruns), and keep
+  the logs as artefacts for the coverage report.
+
+**Tools verified in the sandbox.**
+- `cargo-mutants` 27.1.0 installs from crates.io (`cargo install
+  --locked`); version to pin in CI.
+- AddressSanitizer on `nightly-2026-11-15`:
+  `RUSTFLAGS=-Zsanitizer=address cargo +nightly-2026-11-15 test --locked
+  --target x86_64-unknown-linux-gnu --test alloc --test secmem` builds and
+  passes with `detect_leaks=1` in 45 s, including T-MEM-6's asserting
+  layer under ASan's `malloc` interceptors and T-MEM-1's smaps checks. (A
+  test build only: `RUSTFLAGS` replaces `.cargo/config.toml`'s link
+  hardening flags, which the test build does not need.) The full suite,
+  the PTY children and T-MEM-4 are still to try.
+- `cargo-llvm-cov`: CI only (no `llvm-tools` locally).
+- LazyFS: CI only (GitHub unreachable).
+
+## 2026-11-16 — M9 decisions (owner) and CI round 1 contents
+
+**The repository is now public** (owner, 2026-11-16: the private plan's
+monthly CI minutes ran out). Consequences: standard GitHub-hosted runners,
+including the Arm ones, cost nothing; GitHub artifact attestations are
+available; CI logs and artefacts are public (tests print no secrets by
+design, rule 9, and the canaries are test values); pull requests from forks
+run with a read-only token and no secrets. Only `push` events on `main`
+may write (the `badges` branch, later in M9).
+
+**Owner decisions (2026-11-16):**
+1. Signing: GitHub artifact attestations (Sigstore, keyless), aiming at
+   SLSA v1.0 Build Level 3; only tag builds are signed.
+2. Triggers: pushes and pull requests run every job except Miri
+   (`sanitizers`), `sanitizers-asan`, `durability`, `test-arm64`; these run
+   nightly and on "Run workflow" (`workflow_dispatch`), which also run
+   everything else. Spec 15.3 asks exactly this for `sanitizers` and
+   `durability`.
+3. Badges: default branch `main`; one job (`coverage-report`) may have
+   `contents: write`; branch protection allows it.
+4. T-PERF-1: "excluding fsync" is measured on tmpfs (where `fsync` costs
+   nearly nothing), with no production code added; allocator overhead is
+   an in-process benchmark of a representative workload, `System` vs
+   `ZeroizingAlloc::new(false)`, median of several runs, nightly.
+5. T-SAN-1: `tests/mem.rs` is left out of the ASan run (its scanner reads
+   every mapping, and ASan's reserved shadow is terabytes); T-MEM-4 still
+   runs in `e2e`. LeakSanitizer on (`detect_leaks=1`); any harmless report
+   gets a named, dated suppression, never a global off switch.
+6. T-MUT-1: per-module weekly jobs, sharded, running that module's tests;
+   a fast first pass with reduced case counts, and every survivor re-run
+   against the full suite before it counts (a weaker first pass can only
+   add survivors, which the full run then judges).
+7. aarch64: nightly, on GitHub's Arm runners.
+8. Rule 12: a separate Claude Code session on an exported tree without
+   history or DESIGN_NOTES; brief and file list prepared for the owner
+   (outside the repository).
+9. `scripts/ci_guard.sh` stays.
+10. T-VAULT-1 under Miri: re-split into five parts from measured times.
+
+**Release (spec 15.3).** The spec asks for a `release` job on tags:
+T-REPRO-1, T-ENG-7, build, `sha256sum`, and a *signed checksum file*. It
+does not name a signing method. Interpretation: the checksum file is
+"signed" by a Sigstore attestation, like the binary and the word-list
+licence. `release.yml` (on `v*` tags) calls the reusable
+`release-build.yml`, which builds (scripts/release_build.sh), attests with
+`actions/attest-build-provenance`, and uploads the files plus the Sigstore
+bundle. Build and signing are both in the reusable workflow, so the
+signer identity is that workflow (GitHub's route to Build L3). Users
+verify with `gh attestation verify <file> --repo <owner>/pwv
+--signer-workflow <owner>/pwv/.github/workflows/release-build.yml`. Nothing
+is published automatically: the owner attaches the artefact to a GitHub
+release, so no release job needs `contents: write` (spec 14.13 reserves it
+for `coverage-report`). Caveat: a reusable workflow in the *same*
+repository is isolated from the caller's steps but changes with the same
+commits. A separate repository holding `release-build.yml` would be
+stronger; not done (owner may choose).
+
+**scripts/release_build.sh (T-REPRO-1, T-ENG-7).** Two `--locked` release
+builds of copies of the tree at two different absolute paths, each in a
+clean target directory, `SOURCE_DATE_EPOCH` = the commit time,
+`--remap-path-prefix` for the tree and `CARGO_HOME`; `cmp` must find them
+identical, and neither the work directory, `CARGO_HOME`, nor the checkout
+path may appear in the binary. The flags go in `CARGO_ENCODED_RUSTFLAGS`
+**with the link-hardening flags repeated** (any `RUSTFLAGS`-style variable
+replaces `.cargo/config.toml`'s list), and `readelf` then checks PIE,
+`GNU_RELRO`, and `BIND_NOW`. T-ENG-7: a `memtest,testkdf` release build
+must contain both marker strings (positive control), the artefact
+neither. Runs on every push in the new `release-check` job and in the
+release workflow. `PWV_REPRO_TARGET` makes both builds share one target
+directory (wiping its `release/` first); only for this sandbox, which may
+not create target directories.
+
+**Gate by name for the 24 IDs** (previous entry): the five `test`
+configurations now `tee` into `logs/`, a new step requires an `ok` line
+and no `FAILED` line for every named test of those IDs
+(`scripts/test_ids.py --require`), and the logs are kept as an artefact
+(for the coverage report's test-ID table).
+
+**T-VAULT-1 re-split (decision 10).** The M8 weight model (`k + 1`) did not
+fit (M8 CI round 2). From the measured parts, minus about 5 min of job
+setup, the segments of seed 1 cost about 5 min each for 0–7, 28 for 8–10,
+59 for 11–13 and 51 for 14–15 under Miri (resolution: the old parts). No
+power-law weight separates 11, 12 and 13, so CI now gives explicit
+segment ranges: `PWV_T_VAULT_1_PART=a..b` (or `a..` up to the end), with
+0..10, 10..12, 12..13, 13..14, 14.. (estimated 1h41, 1h32, 1h04, 1h04,
+1h47). `j/n` still works, and its test is unchanged. New test
+`t_vault_1_ci_ranges_cover_every_segment_once` reads the `part:` values in
+ci.yml and checks they are contiguous from 0, the last open-ended, and
+cover every segment once for 0–40 segments, so a mistyped range cannot
+leave a segment unchecked; it also pins the seed-1 split and the parser.
+Caps provisional (350) until measured.
+
+**T-SAN-1 (`sanitizers-asan`, nightly).** The full suite under ASan was
+run locally first (`nightly-2026-11-15`, default features, every test
+target except `tests/mem.rs`, `--lib --bins`, `ASAN_OPTIONS=detect_leaks=1:
+handle_segv=0:log_path=...`): 657 s, every test passed. One finding:
+LeakSanitizer reported the test binary `cli` itself, 10 leaks, all from
+`tests/cli.rs`'s `policy` helper, which leaks each parsed buffer on
+purpose to get a `'static` `Policy`. Harmless (test data, test process),
+but it fails the run. Fixed in the test, not by a suppression: the leaked
+buffers are pushed into a test-only `static KEPT: Mutex<Vec<&'static
+[u8]>>`, so they stay reachable; assertions unchanged. (A suppression
+would match only on symbolized frames, so it would depend on CI having
+`llvm-symbolizer`.) Rerun of `cli` under ASan: no reports.
+- `handle_segv=0`: T-MEM-2's child must die by SIGSEGV and T-MEM-5 sends
+  one; with ASan's handler the process exits 1 instead. Invalid accesses
+  are still caught by ASan's instrumentation; only the handler of a real
+  SIGSEGV is the kernel's.
+- `log_path`: reports from `pwv` children would otherwise go to their PTY,
+  which tests never print. A last step fails the job if any report file
+  exists, and prints them (stack traces, addresses, shadow bytes: no
+  memory contents). `llvm` is installed so CI reports are symbolized.
+- Four configurations (default, `memtest`, `testkdf`, `memtest,testkdf`)
+  under `xvfb-run` with `PWV_REQUIRE_X11`; release is left out (ASan is a
+  debug-build check here, and T-MEM-5 runs in `coredump`/`test`).
+  `--no-default-features` only removes `arboard`; covered by the others.
+- Local runtime 11 min (default); provisional cap 120.
+
+**Page size (aarch64, owner question).** `src` already uses the kernel's
+page size (`sys::Region::new`, `rustix::param::page_size`), but two tests
+assumed 4096:
+- `tests/mem.rs` (T-MEM-4's scanner): `pagemap` has one entry per *real*
+  page, so on a 16 or 64 KiB kernel `addr / 4096` would read the wrong
+  entry, and an unreadable non-guard chunk could be skipped as a guard
+  (a hole in the completeness check) or a guard page reported as
+  unreadable. Its self-test `scan_skips_guard_pages_and_nothing_else`
+  placed the guard at a 4 KiB offset, which `madvise` refuses there, so it
+  would have returned at its "unsupported kernel" branch and passed
+  without testing anything. Both now use the real page size
+  (`rustix::param::page_size()`; Python `mmap.PAGESIZE`). Nothing changes
+  on 4 KiB kernels.
+- `tests/secmem.rs`: the rounding check expects `(MIN_ARENA + 1)` rounded
+  to the real page size (equal to the old `MIN_ARENA + 4096` on 4 KiB).
+GitHub's Arm runners are expected to use 4 KiB pages; `test-arm64` prints
+`getconf PAGESIZE` so the log shows it.
+
+**Local gate result (2026-11-16, M9 round 1).** `cargo test --locked
+--no-fail-fast`: default 462 s, `memtest` 552 s, release 150 s (T-STORE-3
+passed), `testkdf` 504 s, `memtest,testkdf` 574 s, all green;
+`--no-default-features` (`cli`, `e2e`, `clip`, `mig`) 43 s, green.
+`test_ids.py --require` over the five logs: 23 IDs, 0 problems. fmt
+(crate, `fuzz/`), clippy `-D warnings` in six configurations and on the
+fuzz crate, the six `cfg(miri)` compile checks, `loc_budget.py` (4,478 /
+4,800, no `src/` change in this round): clean. `release_build.sh`: T-REPRO-1
+bit-identical, PIE/RELRO/BIND_NOW, T-ENG-7 with its control: ok (51 s with
+a warm dependency cache). ASan: full default suite as above; `cli` rerun
+without reports after the fix. The workflows parse (PyYAML) with the
+intended triggers. Not runnable here: Miri's five new parts, the Arm
+runner, attestation, xvfb under ASan.
+
+## 2026-11-16 — Licence; release workflow placement; vulnerability reporting
+
+- **Licence (owner):** MIT, text supplied by the owner, committed as
+  `LICENSE`. `Cargo.toml`'s `license` changes from `MIT OR Apache-2.0`
+  (no Apache text existed) to `MIT`. `release_build.sh` ships `LICENSE`
+  next to the binary and the word-list licence, and all three are in
+  `SHA256SUMS` and attested. README has a Licence section.
+- **Reusable release workflow** stays in this repository (owner): the
+  same-repository caveat in the M9 decisions entry stands.
+- **Private vulnerability reporting** is enabled on GitHub (owner);
+  `SECURITY.md` points to it.

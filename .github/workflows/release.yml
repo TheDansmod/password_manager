@@ -1,0 +1,20 @@
+# Spec 15.3 `release`: on a version tag, T-REPRO-1, T-ENG-7, build,
+# sha256sum, and a signed checksum file (attestation; see
+# release-build.yml). It publishes nothing itself: the owner attaches the
+# artefact to a GitHub release, so no job here needs `contents: write`
+# (spec 14.13: only `coverage-report` has it).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build.yml

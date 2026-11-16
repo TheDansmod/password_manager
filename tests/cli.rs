@@ -327,9 +327,14 @@ fn command_parser_options_anywhere_and_double_dash() {
     assert_eq!(cmd.opt(&buf, "--symbols"), Some(&b"--!"[..]));
 }
 
+/// Buffers that `policy` leaks for a `'static` lifetime, kept reachable so
+/// LeakSanitizer (T-SAN-1) does not report them (M9).
+static KEPT: std::sync::Mutex<Vec<&'static [u8]>> = std::sync::Mutex::new(Vec::new());
+
 fn policy(line: &str) -> Result<Policy<'static>, &'static str> {
     let (.., buf, cmd) = parse(line)?;
     let buf: &'static [u8] = buf.leak();
+    KEPT.lock().expect("lock").push(buf);
     gen_policy(&cmd, buf)
 }
 
