@@ -29,8 +29,9 @@
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime. Caps were
-# last reset from the M6 CI round 1 timings (DESIGN_NOTES, M6 CI round 1);
-# the `gen-words` jobs first measured in M6 CI round 2 got theirs then.
+# last reset from the M6 CI round 3 and M7 CI round 1 timings, taking the
+# slower of the two for each job: the same Miri job differed by up to 1.9x
+# between those rounds (DESIGN_NOTES, M7 CI round 1).
 # Exceptions near GitHub's 360 min job limit, where 3x does not fit, are
 # capped at 350 and say so in their comment.
 name: ci
@@ -108,22 +109,28 @@ jobs:
     # Needs RLIMIT_MEMLOCK >= 2 MiB (GitHub runners: 8 MiB) and a non-root user
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
-    # Measured 48m00 (M6 round 1; M5 round 1 was 1h02m17): T-VAULT-1 runs
-    # in all five configurations.
+    # Measured 48m00 (M6 round 1; M5 round 1 was 1h02m17; M6 round 3 was
+    # 25m38): T-VAULT-1 runs in all five configurations.
+    # M7 round 1: the runner was lost ("lost communication with the
+    # server") during the testkdf step, in tests/e2e.rs; the cause is not
+    # established (DESIGN_NOTES, M7 CI round 1). Since then the five
+    # configurations run under scripts/ci_guard.sh, which logs available
+    # memory and load once a minute and kills a test process that exhausts
+    # memory, so that a repeat leaves evidence in the log.
     runs-on: ubuntu-26.04
     timeout-minutes: 144
     steps:
       - uses: actions/checkout@v5
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
-        run: cargo test --locked
+        run: sh scripts/ci_guard.sh cargo test --locked
       - name: Debug, memtest (T-MEM-2, T-MEM-3)
-        run: cargo test --locked --features memtest
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest
       - name: Release (T-MEM-5 against the release binary)
-        run: cargo test --locked --release
+        run: sh scripts/ci_guard.sh cargo test --locked --release
       - name: Debug, testkdf (T-FMT-*; T-COMPAT-1 and T-CRY-1 on the golden vaults)
-        run: cargo test --locked --features testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features testkdf
       - name: Debug, memtest + testkdf (T-MEM-7 zero-before-munmap on a locked region)
-        run: cargo test --locked --features memtest,testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest,testkdf
       - name: M4 gate by name (T-STORE-1 .. T-STORE-7, T-STORE-9; one line each in the log)
         # The steps above already run these in every configuration; this
         # step lists each gate test by name and fails if one did not run.
@@ -192,10 +199,10 @@ jobs:
     # manager built on x11rb), and the pure cli/term tests (tests/cli.rs).
     # PWV_REQUIRE_X11 turns a missing display into a failure, so the
     # clipboard tests cannot pass vacuously. T-MEM-* stay in `test` and
-    # `coredump`. Not measured yet: 30 min provisional (local: e2e 40 s,
-    # of which T-E2E-6 waits 31 s; clip about 2 min expected).
+    # `coredump`. Measured 6m02 (M7 round 1).
+    # The test commands run under scripts/ci_guard.sh (see `test`).
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 19
     env:
       PWV_REQUIRE_X11: "1"
     steps:
@@ -205,11 +212,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb xclip
       - name: T-E2E, T-CLIP (default features)
-        run: xvfb-run -a cargo test --locked --test cli --test e2e --test clip 2>&1 | tee e2e.txt
+        run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --test cli --test e2e --test clip 2>&1 | tee e2e.txt
       - name: T-E2E without the clipboard feature (copy fails cleanly)
-        run: cargo test --locked --no-default-features --test cli --test e2e --test clip
+        run: sh scripts/ci_guard.sh cargo test --locked --no-default-features --test cli --test e2e --test clip
       - name: T-E2E, T-CLIP against the release binary
-        run: xvfb-run -a cargo test --locked --release --test e2e --test clip
+        run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --release --test e2e --test clip
       - name: M7 gate by name (one line each in the log)
         run: |
           for t in t_e2e_1_init_weak_password_refused t_e2e_1_init_mismatch_refused \
@@ -294,7 +301,7 @@ jobs:
           - { target: fuzz_body, features: "" }
           - { target: fuzz_open, features: "--features testkdf" }
           - { target: fuzz_import, features: "" }
-          # M7; not measured on CI yet (the 10 min floor applies).
+          # M7; measured 2m13 and 1m57 (M7 round 1).
           - { target: fuzz_tokenizer, features: "" }
           - { target: fuzz_sanitize, features: "" }
     steps:
@@ -321,7 +328,7 @@ jobs:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
     # nightly. One job per suite, in parallel, each with its own cap (3x its
-    # M6 round 1 time); --report-time names any slow test. T-SAN-1 (ASan)
+    # slowest measured time); --report-time names any slow test. T-SAN-1 (ASan)
     # is added in M9.
     runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
@@ -332,16 +339,16 @@ jobs:
           - name: format # measured 9m34 (M6 round 1)
             timeout: 29
             args: "--no-default-features --test format -- --skip t_fmt_2_entry_count"
-          - name: format-10000-entries # measured 11m10 (M6 round 1)
-            timeout: 34
+          - name: format-10000-entries # measured 11m58 (M6 round 3)
+            timeout: 36
             args: "--no-default-features --test format -- --exact t_fmt_2_entry_count_0_max_max_plus_1"
-          - name: format-testkdf # measured 13m48 (M6 round 1)
-            timeout: 42
+          - name: format-testkdf # measured 20m16 (M7 round 1)
+            timeout: 61
             args: "--no-default-features --features testkdf --test format --"
           # Native runs cover the heavy sweeps (T-CRY-1, -3, -5), the 6 MiB
           # capacity case, file I/O, and child processes (Miri isolation).
-          - name: crypto-vault # measured 9m43 (M6 round 1)
-            timeout: 30
+          - name: crypto-vault # measured 10m02 (M7 round 1)
+            timeout: 31
             args: >-
               --no-default-features --features testkdf --test crypto --
               t_kat_ normalize_ kdf_write_policy ct_eq_and_wrap lifecycle_
@@ -365,23 +372,25 @@ jobs:
               new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
-          # Measured 5h09m44 (M6 round 1). 3x does not fit under GitHub's
-          # 360 min job limit: capped at 350, which leaves ~40 min of margin
-          # (owner, 2026-11-14; DESIGN_NOTES, M6 CI round 1).
+          # Measured 5h32m29 (M7 round 1; 5h13m04 in M6 round 3, 5h09m44 in
+          # M6 round 1). 3x does not fit under GitHub's 360 min job limit:
+          # capped at 350 (owner, 2026-11-14; DESIGN_NOTES, M6 CI round 1).
+          # The margin is down to 17 min: an open item for the owner
+          # (DESIGN_NOTES, M7 CI round 1).
           - name: vault-model-t-vault-1-case-1
             timeout: 350
             seed: "1"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
-          - name: vault-model-t-vault-1-case-2 # measured 8m39 (M6 round 1)
-            timeout: 26
+          - name: vault-model-t-vault-1-case-2 # measured 8m47 (M6 round 3)
+            timeout: 27
             seed: "2"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
-          - name: vault-model-t-vault-2 # measured 57m42 (M6 round 1)
-            timeout: 173
+          - name: vault-model-t-vault-2 # measured 1h45m42 (M6 round 3)
+            timeout: 318
             args: >-
               --no-default-features --features testkdf --test vault --
               t_vault_2_
@@ -406,37 +415,37 @@ jobs:
           # round 3): the test found the longest word with `max_by_key`,
           # which is quadratic under Stacked Borrows (about 14 h for the
           # 205,690 words). It now uses a linear loop, is split in two,
-          # and prints phase markers (--nocapture). Local Miri wall times:
-          # word-draw 48 min, word-draw-ends 13 min. Neither is
-          # measured on CI yet: 350 provisional, below the 360 min job
-          # limit; set 3x once CI reports.
-          - name: gen-words-t-gen-4-valid # measured 1h08m36 (M6 round 2)
-            timeout: 206
+          # and prints phase markers (--nocapture). Both passed in M6 CI
+          # round 3 (41m43 and 13m26) and in M7 CI round 1.
+          # Measured 2h01m10 (M7 round 1; 1h18m57 in M6 round 3). 3x does
+          # not fit under the 360 min job limit: capped at 350.
+          - name: gen-words-t-gen-4-valid
+            timeout: 350
             args: >-
               --no-default-features --test gen --
               --exact t_gen_4_valid_policies_produce_valid_output
-          - name: gen-words-word-draw
-            timeout: 350
+          - name: gen-words-word-draw # measured 1h16m20 (M7 round 1)
+            timeout: 230
             args: >-
               --no-default-features --test gen --
               --exact word_draw_maps_three_bytes_to_the_listed_word --nocapture
-          - name: gen-words-word-draw-ends
-            timeout: 350
+          - name: gen-words-word-draw-ends # measured 20m06 (M7 round 1)
+            timeout: 61
             args: >-
               --no-default-features --test gen --
               --exact word_draw_first_middle_and_last_index --nocapture
-          - name: gen-words-os-bytes # measured 10m11 (M6 round 2)
-            timeout: 31
+          - name: gen-words-os-bytes # measured 15m59 (M6 round 3)
+            timeout: 48
             args: >-
               --no-default-features --test gen --
               --exact os_bytes_generates_both_modes
-          - name: gen-words-entropy-known # measured 11m58 (M6 round 2)
-            timeout: 36
+          - name: gen-words-entropy-known # measured 12m07 (M6 round 3)
+            timeout: 37
             args: >-
               --no-default-features --test gen --
               --exact entropy_known_values_and_both_paths
-          - name: gen-words-rng-failure # measured 11m59 (M6 round 2)
-            timeout: 36
+          - name: gen-words-rng-failure # measured 15m47 (M7 round 1)
+            timeout: 48
             args: >-
               --no-default-features --test gen --
               --exact rng_failure_at_every_point_clears_the_slot

@@ -17,6 +17,16 @@ use std::time::{Duration, Instant};
 /// How long a single expectation may take.
 pub const PATIENCE: Duration = Duration::from_secs(30);
 
+/// The most output one child may produce. The tests print a few kilobytes;
+/// a child that writes without end is killed and fails its test here,
+/// instead of growing `screen` until the machine runs out of memory
+/// (DESIGN_NOTES, M7 CI round 1).
+pub const SCREEN_CAP: usize = 4 << 20;
+
+/// The most one `pump` call reads, so that the callers' deadlines are
+/// checked however fast the child writes.
+const PUMP_MAX: usize = 256 << 10;
+
 /// A `pwv` process on a pseudo-terminal, with everything it wrote so far.
 pub struct Pty {
     session: expectrl::session::OsSession,
@@ -156,17 +166,31 @@ impl Pty {
         self.session.get_process().pid().as_raw()
     }
 
-    /// Reads whatever is available; false once the PTY is closed.
+    /// Reads what is available, at most `PUMP_MAX` bytes per call; false
+    /// once the PTY is closed.
+    ///
+    /// # Panics
+    /// If the child has written more than `SCREEN_CAP` bytes; it is
+    /// killed first. The message is fixed: the screen is never printed.
     fn pump(&mut self) -> bool {
         let mut buf = [0u8; 4096];
-        loop {
+        let mut got = 0;
+        while got < PUMP_MAX {
             match self.session.try_read(&mut buf) {
                 Ok(0) => return false,
-                Ok(n) => self.screen.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    self.screen.extend_from_slice(&buf[..n]);
+                    got += n;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return true,
                 Err(_) => return false,
             }
+            if self.screen.len() > SCREEN_CAP {
+                let _ = self.session.get_process_mut().signal(Signal::SIGKILL);
+                panic!("pty: the child wrote more than SCREEN_CAP bytes; killed");
+            }
         }
+        true
     }
 
     fn find(&self, needle: &str) -> Option<usize> {

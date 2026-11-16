@@ -931,6 +931,9 @@ fn gen_reports_entropy_and_shows_the_value_only_on_request() {
     let mut p = home.spawn(&["gen", "--words", "5", "--sep", ".", "--show"]);
     assert!(p.expect("Entropy: 88."), "5 x 17.65 bits");
     assert!(p.expect(" bits\r\n"));
+    // The value is written by a later `write(2)`: wait for its line end
+    // before reading it back (`between` reads only what has arrived).
+    assert!(p.expect("\r\n"), "value line");
     let phrase = p.between(" bits\r\n", "\r\n").expect("value");
     assert_eq!(phrase.split('.').count(), 5);
     if clipboard {
@@ -1000,4 +1003,17 @@ fn doctor_reports_every_check_and_exits_0_or_1() {
     assert_eq!(code, i32::from(p.saw("[FAIL]")), "exit 1 iff a check fails");
     assert!(p.saw("no vault yet"), "doctor creates nothing");
     assert!(!home.vault().exists());
+}
+
+// ------------------------------------------------------- PTY harness
+
+/// A child that writes without end is killed and fails its test at
+/// `SCREEN_CAP`, with a fixed message; the capture must not grow until
+/// the machine is out of memory (DESIGN_NOTES, M7 CI round 1).
+#[test]
+#[should_panic(expected = "more than SCREEN_CAP bytes")]
+fn harness_stops_a_child_that_floods_the_terminal() {
+    let mut p = Pty::spawn(common::shell_command("exec yes"));
+    // Never appears; `expect` must end by the cap, not by its deadline.
+    let _ = p.expect("pwv> ");
 }

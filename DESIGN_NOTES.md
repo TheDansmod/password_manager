@@ -1871,3 +1871,160 @@ T-MEM-5's `coredumpctl` clause.
 - **The M7 CI round the owner started** was pushed before the
   `loc_budget.py` change, so its `lint` job is expected to fail at
   T-ENG-6 (1,605 against the old 1,300) for that reason alone.
+
+## 2026-11-16 — M6 CI round 3: M6 gate green on CI
+
+Every job passed (owner's report, 2026-11-16). **The M6 gate is passed.**
+
+- `sanitizers (gen-words-word-draw)` 41m43 and
+  `sanitizers (gen-words-word-draw-ends)` 13m26 (local Miri: 47m35 and
+  13m03). The `max_by_key` diagnosis of round 3 is confirmed on CI.
+- `sanitizers (vault-model-t-vault-1-case-1)` 5h13m04 against its 350 min
+  cap.
+- `test` 25m38 (48m00 in round 1: the same job, the same five
+  configurations; runner speed varies this much).
+
+Caps: see the next entry (both rounds are used together).
+
+## 2026-11-16 — M7 CI round 1: runner lost in `test`; cause not established
+
+**Result (owner's report, 2026-11-16).** Every job passed except `test`.
+The M7 gate is **not** passed: it needs another CI round.
+
+- New jobs: `e2e` 6m02 (T-E2E-1 .. T-E2E-12 and T-CLIP-1 .. T-CLIP-4 ran
+  for the first time anywhere and passed, in three configurations);
+  `fuzz-smoke (fuzz_tokenizer)` 2m13; `fuzz-smoke (fuzz_sanitize)` 1m57;
+  `supply` 5m26 (no complaint after the lock-file change).
+- `lint` passed (2m41), so the push did include the `loc_budget.py`
+  change; the failure predicted in the M7 hand-over did not happen.
+- `test` ended after 1h02m02 with GitHub's annotation "The hosted runner
+  lost communication with the server", during the step "Debug, testkdf".
+  The steps before it (default, `memtest`, release) had passed, each
+  including all of `tests/e2e.rs`.
+
+### What the log shows
+
+- The log ends inside `tests/e2e.rs`: 25 of its 26 tests are reported
+  `ok`. The missing one is `t_e2e_6_idle_timeout_locks_and_exits_0`, the
+  test that waits 30 s for the idle timeout. It always finishes last and
+  alone.
+- libtest prints "test … has been running for over 60 seconds" for a slow
+  test (it did so for `t_cry_3` in the same log). There is no such line
+  for T-E2E-6. So the log stream stopped within about a minute of that
+  test's start: **this was a sudden loss, not a test that hung for a long
+  time.** (A plain hang would also have run into the 144 min job cap, not
+  into a lost runner.)
+- A lost runner uploads no further log, so the log cannot say more.
+
+### What was examined (2026-11-16, sandbox)
+
+1. **Reproduction: none.** `tests/e2e.rs` (debug, `testkdf`, the CI
+   configuration) ran 89 times: once alone, 24 times on 4-core slices, 64
+   times on 2-core slices with eight copies in parallel, each run under
+   a 150 s limit and a 6 GB address-space limit. No run hit either
+   limit, and no process was left behind afterwards.
+2. **`pwv` at the prompt does not write or spin.** A live session at
+   `pwv> ` was given: nothing, SIGCONT, SIGWINCH, SIGINT, SIGTSTP then
+   SIGCONT, Ctrl-D, a partial line then Ctrl-D, Ctrl-Z, Ctrl-S, NUL
+   bytes, invalid UTF-8, a 4,000-byte line, a second open of the slave, a
+   closed master, and a terminal switched to non-canonical mode. In every
+   case: at most one error line, 0 CPU ticks in 3 s, and a clean exit
+   where one is specified.
+3. **Source reading.** `Session::prompt` (the one `poll` loop), the idle
+   exit, `term::read_raw`, `sys::write_fd`, and the signal flag have no
+   path that repeats output. Neither `pwv` nor the tests send a signal to
+   anything but the child's own PID (`ptyprocess` 0.5.0 `kill`, read in
+   the pinned source). No orphan processes after the suite.
+4. **One real defect in the harness, found by reading.** `Pty::pump`
+   (`tests/common/pty.rs`) read "whatever is available" in a loop with no
+   bound, into a `Vec` with no cap, and the deadline of `expect` was only
+   checked after `pump` returned. A child that writes without end would
+   have kept the test inside `pump` for ever and grown the buffer until
+   the machine ran out of memory, which is one of the ways GitHub
+   documents for losing a runner. **Nothing found makes a child do
+   that**, and the rate looks too low to fit the log: the bounded reader
+   takes about 4 s for 4 MiB from `yes`; the unbounded one was not
+   measured, but at any rate a PTY carries, a 16 GB runner would last
+   minutes at least, and the "over 60 seconds" line would have appeared
+   (an estimate, not a measurement). It is fixed because it is wrong,
+   not because it is shown to be the cause.
+
+### Conclusion: not established
+
+The evidence fits none of the explanations fully:
+
+| Explanation | For | Against |
+|---|---|---|
+| A child flooded the PTY and the unbounded `pump` exhausted memory | the only mechanism in the code that can starve a runner; the log ends in the PTY tests | no child was found to flood; too slow for the missing "60 seconds" line |
+| A fault of the hosted runner or its image (ubuntu-26.04), unrelated to pwv | no mechanism found in pwv; 89 clean local runs; three earlier steps and the `e2e` job ran the same tests cleanly | the log ends exactly in the newest, most terminal-heavy test binary, which would be a coincidence |
+| Something in the environment that the sandbox does not have (kernel, PTY behaviour) | would explain why it does not reproduce | no evidence |
+
+This is recorded as **open**, not as solved.
+
+### Changes (rule 2: no check is weakened)
+
+- **`tests/common/pty.rs`:** `pump` reads at most 256 KiB per call
+  (`PUMP_MAX`), so every caller's deadline is checked however fast the
+  child writes. Above 4 MiB of output per child (`SCREEN_CAP`; the tests
+  produce a few kilobytes) it kills the child and panics with a fixed
+  message. The screen is still never printed (rule 9).
+- **`tests/e2e.rs`, new test** `harness_stops_a_child_that_floods_the_terminal`:
+  `yes` on a PTY must end in that panic (`should_panic`), in about 4 s.
+- **`tests/e2e.rs`, a flake fixed** (seen once in the 89 runs, not on CI):
+  `gen_reports_entropy_and_shows_the_value_only_on_request` waited for
+  the `Entropy:` line and then read the value line with `between`, which
+  looks only at what has arrived; `pwv` writes the value with a later
+  `write(2)`. The test now waits for the value's line end first. The
+  assertions are unchanged.
+- **`scripts/ci_guard.sh`, new**, around the eight `cargo test` commands
+  of `test` and `e2e`. While the command runs it prints one line a
+  minute (UTC time, available memory, load), names the largest test
+  process when available memory is below 2 GiB, and kills that process
+  below 1 GiB. It reads `/proc` only, prints program paths under the
+  target directory and never arguments (rule 9), and returns the
+  command's status. Purpose: a repeat of the loss leaves a record of the
+  minute before it, and a memory exhaustion becomes a failed step with a
+  named process instead of a lost runner. Checked locally: the kill
+  path, the quiet path, the heartbeat, and status pass-through. It can be
+  removed once the cause is known or the loss has not recurred.
+- No change to `src/`. LOC is unchanged (4,438 / 4,800).
+
+### Caps (both rounds)
+
+The Miri jobs ran the same code in M6 round 3 and M7 round 1, and the
+same job differed by up to 1.9x between them (`gen-words-word-draw`
+41m43 and 1h16m20; `gen-words-rng-failure` 8m05 and 15m47). Each cap is
+now 3x the **slower** measurement (10 min floor, below 360).
+
+| Job | M6 r3 | M7 r1 | Cap before | Cap now |
+|---|---|---|---|---|
+| `format-10000-entries` | 11m58 | 9m55 | 34 | 36 |
+| `format-testkdf` | 17m03 | 20m16 | 42 | 61 |
+| `crypto-vault` | 7m34 | 10m02 | 30 | 31 |
+| `vault-model-t-vault-1-case-1` | 5h13m04 | 5h32m29 | 350 | 350 |
+| `vault-model-t-vault-1-case-2` | 8m47 | 6m00 | 26 | 27 |
+| `vault-model-t-vault-2` | 1h45m42 | 1h05m47 | 173 | 318 |
+| `gen-words-t-gen-4-valid` | 1h18m57 | 2h01m10 | 206 | 350 (3x is 364) |
+| `gen-words-word-draw` | 41m43 | 1h16m20 | 350 (provisional) | 230 |
+| `gen-words-word-draw-ends` | 13m26 | 20m06 | 350 (provisional) | 61 |
+| `gen-words-os-bytes` | 15m59 | 11m52 | 31 | 48 |
+| `gen-words-entropy-known` | 12m07 | 11m43 | 36 | 37 |
+| `gen-words-rng-failure` | 8m05 | 15m47 | 36 | 48 |
+| `e2e` | — | 6m02 | 30 (provisional) | 19 |
+
+Unchanged, still within 3x: `lint`, `test` (144), `compat`, `fuzz-smoke`
+(10 min floor; the two new targets are measured now), `format`,
+`vault-model`, `gen`, `gen-words-passphrase-too-long`, `durability`,
+`coredump`, `supply`.
+
+### Open items for the owner
+
+1. **The cause of the lost runner.** Two things would narrow it down:
+   the timestamps in the raw log of the failed job (the last `... ok`
+   line against the time the job ended), and whether a re-run of that
+   job on the same commit passes.
+2. **`vault-model-t-vault-1-case-1` ran 5h32m29 against a 350 min cap**
+   (and GitHub's 360 min limit): 17 min of margin, less than the
+   difference between two runs. It will time out on a slow runner. Not
+   changed here: every remedy changes what Miri covers or how the job is
+   split, which is the owner's decision.
