@@ -101,4 +101,40 @@ Technology. The full licence text is in `src/wordlist.LICENSE`; it must
 accompany any copy of the list, including release artefacts (the binary
 embeds the list).
 
-The migration checklist (spec Section 12.3) is added in M8.
+## Migrating from `encrypted_pw_mgr.py`
+
+The legacy program keeps its vault as JSON encrypted by GnuPG. The one-off
+migration is a pipe; the plaintext never touches a disk:
+
+    python3 -I tools/migrate_legacy.py --vault <legacy vault> | pwv import --from-stdin
+
+1. `gpg` asks for the **legacy** passphrase first (the script never sees
+   it). The script then prints `N entries, M fields, K warnings` and any
+   refusals, by entry name only.
+2. Then `pwv` asks for its **master password**. It asks only after the
+   pipe has ended, so the two prompts never overlap, and not at all if the
+   legacy side failed.
+3. A name already in the vault aborts the import; add
+   `--on-conflict suffix` to import it as `<name> (imported)`.
+
+The script needs Python 3 and GnuPG 2.2.7 or later, nothing from PyPI.
+Fields named like a secret (`password`, `pin`, `api key`, ...; spec
+Section 9.3) become sensitive. A missing value (`null`, which the legacy
+password generator could store) becomes empty, with a warning. Two keys
+in one entry that differ only in letter case, control characters, and
+values that are not text abort the whole migration, listing every
+affected entry: fix them in the legacy program and run it again.
+
+Checklist (spec Section 12.3):
+
+- [ ] Run `pwv init`, then the migration pipe; compare the counts.
+- [ ] Spot-check three entries with `show` and `reveal`.
+- [ ] Securely delete the legacy files: the encrypted vault, its dumps
+      (`password_dump-*.enc`), and especially any `password_dump.txt`.
+- [ ] If `password_dump.txt` ever existed on a synced or indexed folder,
+      rotate the credentials it contained, starting with email and
+      financial accounts.
+
+Run the migration once, preferably with swap disabled
+(`sudo swapoff -a`): Python cannot wipe the decrypted data from its
+memory.

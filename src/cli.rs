@@ -1570,21 +1570,9 @@ fn cmd_passwd(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
     Ok(())
 }
 
-fn cmd_import(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
-    let suffix = match cmd.opt(ses.input.expose(), "--on-conflict") {
-        None | Some(b"abort") => false,
-        Some(b"suffix") => true,
-        Some(_) => return Err(user("--on-conflict takes abort or suffix")),
-    };
-    if !cmd.has("--from-stdin") || ses.hard.stdin_tty {
-        return Err(user(
-            "import reads a canonical body from a pipe: `... | pwv import --from-stdin`",
-        ));
-    }
-    let v = ses.vault.as_mut().ok_or_else(no_vault)?;
-    // Raw-read stdin into the scratch half (Section 12.2); the cap is the
-    // slot size.
-    let scratch = v.model.scratch();
+/// Raw-reads standard input to its end into `scratch` (Section 12.2); the
+/// cap is the slot size. On error `scratch` is empty.
+fn read_pipe(scratch: &mut SecretSlot<'_>) -> Result<(), Fail> {
     scratch.clear();
     let cap = scratch.capacity();
     scratch.set_len(cap).map_err(|e| user(e.message()))?;
@@ -1605,6 +1593,38 @@ fn cmd_import(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
         scratch.clear();
         return read.and(Err(no_vault()));
     }
+    Ok(())
+}
+
+/// `import` unlocks by itself, after the pipe was read to its end (owner
+/// decision 2026-11-16): the producer of the pipe asks for the legacy
+/// passphrase on the same terminal, so the master password is asked only
+/// once that program has finished. The body waits in the scratch half.
+fn cmd_import(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
+    let suffix = match cmd.opt(ses.input.expose(), "--on-conflict") {
+        None | Some(b"abort") => false,
+        Some(b"suffix") => true,
+        Some(_) => return Err(user("--on-conflict takes abort or suffix")),
+    };
+    let piped = cmd.has("--from-stdin") && !ses.hard.stdin_tty;
+    if ses.vault.is_none() {
+        if let (true, Some((_, scratch))) = (piped, ses.halves.as_mut()) {
+            read_pipe(scratch)?;
+            // Nothing arrived: the producer failed. Refuse before asking
+            // for the master password.
+            if scratch.is_empty() {
+                return Err(user("import refused: the pipe delivered nothing"));
+            }
+        }
+        ses.unlock().map_err(|f| leave(f.code, &f.msg))?;
+        sys::scrub_stack();
+    }
+    if !piped {
+        return Err(user(
+            "import reads a canonical body from a pipe: `... | pwv import --from-stdin`",
+        ));
+    }
+    let v = ses.vault.as_mut().ok_or_else(no_vault)?;
     let count = v.model.import(suffix).map_err(|e| match e {
         vault::Error::Invalid(fe) => match fe.entry() {
             Some(i) => user(&format!("import refused: {} (entry {i})", fe.message())),
@@ -1763,7 +1783,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     row(&["rm"], "rm <name>", "delete an entry", (1, 1), &[], true, cmd_rm),
     row(&["gen"], "gen [--len L] [--classes luds] [--symbols S] [--no-ambiguous] [--words k] [--sep c] [--show]", "generate and copy a password or passphrase", (0, 0), GEN_FLAGS, false, cmd_gen),
     row(&["passwd"], "passwd [--kdf-memory MiB] [--kdf-time t] [--accept-weak-password]", "change the master password", (0, 0), KEY_FLAGS, true, cmd_passwd),
-    row(&["import"], "import --from-stdin [--on-conflict abort|suffix]", "merge a canonical body from a pipe", (0, 0), &[("--from-stdin", false), ("--on-conflict", true)], true, cmd_import),
+    row(&["import"], "import --from-stdin [--on-conflict abort|suffix]", "merge a canonical body from a pipe", (0, 0), &[("--from-stdin", false), ("--on-conflict", true)], false, cmd_import),
     row(&["doctor"], "doctor", "report the security posture of the environment", (0, 0), &[], false, cmd_doctor),
     row(&["help"], "help", "show this list", (0, 0), &[], false, cmd_help),
     row(&["quit", "exit", "lock"], "quit (exit, lock)", "wipe and exit", (0, 0), &[], false, cmd_quit),
@@ -1821,7 +1841,28 @@ pub fn run(hardening: &Hardening) -> i32 {
     };
     drop(arena);
     sys::scrub_stack();
+    #[cfg(feature = "memtest")]
+    wiped_pause();
     code
+}
+
+/// `memtest` only (Section 5.8, T-MEM-4): when `PWV_MEMTEST_EXIT_PAUSE` is
+/// set, reports that the wipe is done and blocks until the harness sends
+/// SIGUSR1, so that it can scan the process once more before it exits.
+/// The session and the arena no longer exist here: only the signal flag
+/// is used.
+#[cfg(feature = "memtest")]
+fn wiped_pause() {
+    if std::env::var_os("PWV_MEMTEST_EXIT_PAUSE").is_none() {
+        return;
+    }
+    sys::write_stderr(b"PWV_MEMTEST wiped\n");
+    while !matches!(
+        sys::take_signal(),
+        Some(sys::Signal::Resume | sys::Signal::Terminate)
+    ) {
+        sys::nap(20);
+    }
 }
 
 /// Reports an environment refusal on fd 2 (there is no terminal to use).

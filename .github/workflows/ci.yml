@@ -21,6 +21,13 @@
 # and T-FUZZ-4 (`fuzz_tokenizer`), T-FUZZ-5 (`fuzz_sanitize`) in
 # `fuzz-smoke`. The `strength` feature and `zxcvbn` are gone (DESIGN_NOTES,
 # M7).
+# M8: in `e2e`, T-MEM-4 (tests/mem.rs, memtest build, canary scan through
+# /proc/<pid>/mem, under xvfb-run so the clipboard exception is exercised)
+# and T-MIG-1 .. T-MIG-3 plus T-E2E-10's real pipe (tests/mig.rs) with the
+# real gpg and a fixture written by the original encrypted_pw_mgr.py
+# (PWV_REQUIRE_GPG makes that mandatory), plus an "M8 gate by name" step.
+# In `test`, both files run in every configuration (mem.rs only does
+# something in memtest builds; mig.rs uses its stand-in gpg there).
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -30,7 +37,7 @@
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime. Caps were
 # last reset from the M6 CI round 3 and M7 CI round 1 timings, taking the
-# slower of the two for each job: the same Miri job differed by up to 1.9x
+# slower of the two for each job (two raised after M7 CI round 2): the same Miri job differed by up to 1.9x
 # between those rounds (DESIGN_NOTES, M7 CI round 1).
 # Exceptions near GitHub's 360 min job limit, where 3x does not fit, are
 # capped at 350 and say so in their comment.
@@ -45,6 +52,13 @@ on:
 permissions:
   contents: read
 
+# `bash -eo pipefail`: GitHub's default for steps without a `shell` is
+# `bash -e`, under which `cargo test ... | tee log` takes the status of
+# `tee` and a failing test passes its step (M8 CI round 1, DESIGN_NOTES).
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_DENY_VERSION: "0.20.2"
@@ -54,6 +68,11 @@ env:
   # `compat`: reference implementations for the independent golden check.
   PY_ARGON2_CFFI_VERSION: "23.1.0"
   PY_PYNACL_VERSION: "1.5.0"
+  # M8, T-MIG-1: the legacy program's own imports, to write the fixture
+  # with the original encrypted_pw_mgr.py (tests/legacy/make_fixture.py).
+  PY_GNUPG_VERSION: "0.5.7"
+  PY_RICH_VERSION: "15.0.0"
+  PY_PYPERCLIP_VERSION: "1.11.0"
 
 jobs:
   lint:
@@ -155,6 +174,7 @@ jobs:
         run: |
           cargo test --locked --release --test vault 2>&1 | tee vault.txt
           for t in t_vault_1_model_matches_reference \
+              t_vault_1_parts_cover_every_segment_once \
               t_vault_2_collisions_leave_model_and_file_identical \
               t_vault_2_random_models \
               import_rejects_invalid_bodies_and_every_truncation \
@@ -201,16 +221,44 @@ jobs:
     # clipboard tests cannot pass vacuously. T-MEM-* stay in `test` and
     # `coredump`. Measured 6m02 (M7 round 1).
     # The test commands run under scripts/ci_guard.sh (see `test`).
+    # Measured 6m19 (M7 round 2). M8 adds T-MEM-4 and T-MIG (about 2 min
+    # more locally): provisional cap 25 until measured.
     runs-on: ubuntu-26.04
-    timeout-minutes: 19
+    timeout-minutes: 25
     env:
       PWV_REQUIRE_X11: "1"
+      PWV_REQUIRE_GPG: "1"
     steps:
       - uses: actions/checkout@v5
-      - name: Install Xvfb and xclip
+      - name: Install Xvfb, xclip, and GnuPG
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xclip
+          sudo apt-get install -y xvfb xclip gnupg
+          gpg --version | sed -n 1p
+      - name: Legacy program's Python imports (T-MIG-1 fixture)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/legacy"
+          "$RUNNER_TEMP/legacy/bin/pip" install "python-gnupg==$PY_GNUPG_VERSION" \
+            "rich==$PY_RICH_VERSION" "pyperclip==$PY_PYPERCLIP_VERSION"
+          echo "PWV_LEGACY_PYTHON=$RUNNER_TEMP/legacy/bin/python" >> "$GITHUB_ENV"
+      - name: T-MEM-4 (memtest), T-MIG, T-E2E-10 with the real gpg
+        run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --no-fail-fast --features memtest --test mem --test mig 2>&1 | tee m8.txt
+      - name: M8 gate by name (one line each in the log)
+        run: |
+          for t in scan::t_mem_4_canary_scan_mid_session_and_after_lock \
+              scan::t_mem_4_signal_eof_and_idle_exits_are_wiped \
+              scan::exit_pause_needs_the_environment_variable \
+              scan::scan_skips_guard_pages_and_nothing_else \
+              t_mig_1_legacy_fixture_imports_the_expected_model_with_its_warning \
+              t_mig_1_key_case_collision_and_invalid_entries_are_refused \
+              t_mig_1_wrong_legacy_passphrase_imports_nothing \
+              t_mig_1_a_vault_larger_than_the_pipe_buffer_arrives_whole \
+              t_mig_2_malicious_pickle_aborts_and_creates_no_marker \
+              t_mig_2_script_has_no_code_executing_parser \
+              t_mig_3_stdout_must_be_a_pipe \
+              migrate_script_requires_the_vault_argument; do
+            grep -Eq "^test $t \.\.\. ok$" m8.txt || { echo "missing: $t"; exit 1; }
+          done
       - name: T-E2E, T-CLIP (default features)
         run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --test cli --test e2e --test clip 2>&1 | tee e2e.txt
       - name: T-E2E without the clipboard feature (copy fails cleanly)
@@ -235,6 +283,7 @@ jobs:
               t_e2e_8_control_and_bidi_characters_are_shown_as_escapes \
               t_e2e_9_rm_needs_the_exact_name_and_there_is_no_export \
               t_e2e_10_import_valid_invalid_and_tty \
+              t_e2e_10_import_reads_the_pipe_before_asking_for_the_master_password \
               t_e2e_11_passwd_then_only_the_new_password_opens \
               t_e2e_12_no_terminal_is_exit_4 \
               t_cry_2_wrong_password_and_damage_look_the_same \
@@ -372,14 +421,39 @@ jobs:
               new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
-          # Measured 5h32m29 (M7 round 1; 5h13m04 in M6 round 3, 5h09m44 in
-          # M6 round 1). 3x does not fit under GitHub's 360 min job limit:
-          # capped at 350 (owner, 2026-11-14; DESIGN_NOTES, M6 CI round 1).
-          # The margin is down to 17 min: an open item for the owner
-          # (DESIGN_NOTES, M7 CI round 1).
-          - name: vault-model-t-vault-1-case-1
+          # Seed 1 (153 operations, 16 segments of 10) ran 5h09m44 to
+          # 5h32m29 in one job, against GitHub's 360 min limit. Since M8 it
+          # runs in four parts (PWV_T_VAULT_1_PART=j/4; segments 0-7, 8-10,
+          # 11-13, 14-15): each part replays the earlier operations on the
+          # reference only and starts from the file the full run would
+          # reopen there. Every operation is checked in exactly one part;
+          # all four are needed (DESIGN_NOTES, M8 CI round 1). Caps are
+          # provisional (350) until measured.
+          - name: vault-model-t-vault-1-case-1-part-1
             timeout: 350
             seed: "1"
+            part: "1/4"
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-1-case-1-part-2
+            timeout: 350
+            seed: "1"
+            part: "2/4"
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-1-case-1-part-3
+            timeout: 350
+            seed: "1"
+            part: "3/4"
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-1-case-1-part-4
+            timeout: 350
+            seed: "1"
+            part: "4/4"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
@@ -424,8 +498,8 @@ jobs:
             args: >-
               --no-default-features --test gen --
               --exact t_gen_4_valid_policies_produce_valid_output
-          - name: gen-words-word-draw # measured 1h16m20 (M7 round 1)
-            timeout: 230
+          - name: gen-words-word-draw # measured 1h17m43 (M7 round 2)
+            timeout: 234
             args: >-
               --no-default-features --test gen --
               --exact word_draw_maps_three_bytes_to_the_listed_word --nocapture
@@ -449,8 +523,8 @@ jobs:
             args: >-
               --no-default-features --test gen --
               --exact rng_failure_at_every_point_clears_the_slot
-          - name: gen-words-passphrase-too-long # measured 10m12 (M6 round 2)
-            timeout: 31
+          - name: gen-words-passphrase-too-long # measured 13m42 (M7 round 2)
+            timeout: 42
             args: >-
               --no-default-features --test gen --
               --exact passphrase_too_long_for_slot_is_capacity
@@ -462,14 +536,17 @@ jobs:
           rustup toolchain install nightly --profile minimal --component miri
           cargo +nightly miri setup
       - name: T-SAN-2 Miri (${{ matrix.name }})
-        # Entries with a `seed` run one proptest case with that fixed seed:
-        # Miri isolation hides the host environment, so the two variables
-        # are forwarded explicitly (tests/vault.rs, `cases`).
+        # Entries with a `seed` run one proptest case with that fixed seed,
+        # and a `part` runs one part of it: Miri isolation hides the host
+        # environment, so these variables are forwarded explicitly
+        # (tests/vault.rs, `cases`, `t_vault_1_part_env`).
         env:
           PROPTEST_CASES: ${{ matrix.seed && '1' || '' }}
           PROPTEST_RNG_SEED: ${{ matrix.seed }}
+          PWV_T_VAULT_1_PART: ${{ matrix.part }}
           MIRIFLAGS: >-
             ${{ matrix.seed && '-Zmiri-env-forward=PROPTEST_CASES -Zmiri-env-forward=PROPTEST_RNG_SEED' || '' }}
+            ${{ matrix.part && '-Zmiri-env-forward=PWV_T_VAULT_1_PART' || '' }}
         run: >-
           cargo +nightly miri test --locked ${{ matrix.args }}
           -Zunstable-options --report-time

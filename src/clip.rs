@@ -106,6 +106,12 @@ impl Clip {
     /// to the empty string. `slot` is zeroed in every case, also when the
     /// clipboard cannot be read. Call this before dropping the `Clip`
     /// (step 4), so a hand-over to a clipboard manager carries nothing.
+    ///
+    /// The clipboard handle is then dropped (the next copy makes a new
+    /// one): a value that another client pasted went through the X11
+    /// connection's write buffer (x11rb 0.13.2, `WriteBuffer::data_buf`),
+    /// which keeps sent bytes until they are overwritten. Dropping the
+    /// handle frees that buffer, and the allocator wipes it (T-MEM-4).
     pub fn clear_if_unchanged(&mut self, slot: &mut SecretSlot<'_>) {
         if !slot.is_empty() {
             let ours = self
@@ -116,5 +122,9 @@ impl Clip {
             }
         }
         slot.clear();
+        #[cfg(feature = "clipboard")]
+        {
+            self.board = None;
+        }
     }
 }
