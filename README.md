@@ -3,14 +3,59 @@
 A single-binary, Linux-first terminal password manager written in Rust,
 specified in `rust_password_manager_specification.md` (one level up).
 
-**Status: M6 (generator).** Process hardening, the secure arena, the
-zeroizing allocator, the vault file format (`FORMAT.md`, `src/format.rs`),
-the key hierarchy (`src/crypto.rs`; init, unlock, save, and passwd at
-library level in `src/vault.rs`), storage (`src/store.rs`: XDG paths,
-open-time checks, `flock`, atomic save, five backups, rollback-state file),
-the in-memory model (`src/vault.rs`), and the password and passphrase
-generator (`src/gen.rs`) exist at library level; no commands yet. The binary hardens itself, waits for one line on the
-terminal, and exits with code 5.
+**Status: M7 (terminal, CLI, clipboard).** All seventeen commands exist,
+in an interactive session (`pwv`) and as one-shot invocations
+(`pwv <command> ...`). Still to come: the memory canary scan and the
+legacy migration script (M8), and release hardening (M9).
+
+## Quick start
+
+```sh
+pwv init          # create the vault; a generated 6-word passphrase is offered
+pwv               # unlock and start a session
+pwv> add github   # guided: field key, then typed / hidden / gen [options]
+pwv> show github  # sensitive values are masked
+pwv> copy github  # first sensitive field to the clipboard, cleared after 10 s
+pwv> quit
+pwv doctor        # check swap, core dumps, memory locking, vault location
+```
+
+Every prompt and all output use `/dev/tty`. Standard output must be a
+terminal; standard input may be a pipe only for `pwv import --from-stdin`.
+
+| Command | Effect |
+| --- | --- |
+| `init [--kdf-memory MiB] [--kdf-time t]` | Create a vault |
+| `ls [pattern]` | List entry names (case-insensitive substring) |
+| `show <name>` | Show an entry; sensitive values as 8 bullets |
+| `reveal <name> <field>` | Print one value; Enter clears screen and scrollback |
+| `copy <name> [field]` | Copy with expiry (`--clip-timeout`, default 10 s) |
+| `add <name>` | Create an entry field by field |
+| `set <name> <field> [--gen [options]] [--sensitive\|--plain]` | Create or replace a field |
+| `unset <name> <field>` | Remove a field |
+| `mv <old> <new>`, `mvfield <name> <old> <new>` | Rename an entry or a field |
+| `rm <name>` | Delete an entry (type its name to confirm) |
+| `gen [--len L] [--classes luds] [--symbols S] [--no-ambiguous] [--words k] [--sep c] [--show]` | Generate and copy, without storing |
+| `passwd [--kdf-memory MiB] [--kdf-time t]` | Change the master password (rotates salt and key) |
+| `import --from-stdin [--on-conflict abort\|suffix]` | Merge a canonical body from a pipe |
+| `doctor` | Report the security posture of the environment |
+| `help`, `quit` (`exit`, `lock`) | Help; wipe and exit |
+
+In a session, arguments are separated by spaces; double quotes group, and
+`\"` and `\\` are the only escapes. A bare `--` ends the options, so a
+name that starts with `--` can be addressed. Names given to a one-shot
+command are visible to other processes in the process list; use a session
+for names you consider private.
+
+**Master password.** `init` and `passwd` offer a generated passphrase and
+strongly recommend it. A password you choose is entered twice and must
+have at least 16 characters and an estimated 10^14 guesses; the estimate
+is a built-in heuristic (repeats, runs, keyboard rows, words of the
+embedded list), not a dictionary attack simulation. `--accept-weak-password`
+plus a typed sentence overrides it.
+
+Exit codes: 0 success, 1 user error, 2 wrong password or damaged vault,
+3 integrity or rollback refusal, 4 environment refusal, 5 internal error.
 
 ## Building and checking
 
@@ -34,9 +79,14 @@ cargo test --locked --test store          # T-STORE-1, -3 .. -7, -9
 PWV_T_STORE_3_ITERATIONS=5000 cargo test --locked --release --test store -- --exact t_store_3_kill_loop
 PWV_FOREIGN_DIR=/mnt/vfat cargo test --locked --test store t_store_1_foreign_fs_real_mount
 cargo test --locked --test gen            # T-GEN-1 .. T-GEN-6
+cargo test --locked --test cli            # tokenizer, parsers, sanitize, strength, doctor
+cargo test --locked --test e2e            # T-E2E-1 .. T-E2E-12 through a PTY
+PWV_REQUIRE_X11=1 xvfb-run -a cargo test --locked --test clip   # T-CLIP-1 .. T-CLIP-4 (needs xclip)
 cargo +nightly miri test --no-default-features --test format   # T-SAN-2 (format)
 cargo +nightly fuzz run fuzz_body -- -max_total_time=60   # T-FUZZ-2 (see fuzz/README.md)
 cargo +nightly fuzz run --features testkdf fuzz_open -- -max_total_time=60   # T-FUZZ-3
+cargo +nightly fuzz run fuzz_tokenizer -- -max_total_time=60   # T-FUZZ-4
+cargo +nightly fuzz run fuzz_sanitize -- -max_total_time=60    # T-FUZZ-5
 ```
 
 ## Word list
@@ -46,6 +96,9 @@ lower-case words (5 to 24 letters; four contain a hyphen), SHA-256
 `9b7bb4cc2ede3e5573174339e0547c774b67e769cfda1fbbc93038ec66a93320`,
 supplied by the project owner in place of the EFF large list (spec Section
 10.3). Each word carries about 17.65 bits; the 6-word default about 105.9.
+The list is MIT-licensed: Copyright (c) 2012 Rochester Institute of
+Technology. The full licence text is in `src/wordlist.LICENSE`; it must
+accompany any copy of the list, including release artefacts (the binary
+embeds the list).
 
-The quick start, command reference, and migration checklist (spec Section
-12.3) are added in later milestones.
+The migration checklist (spec Section 12.3) is added in M8.

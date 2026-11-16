@@ -1,0 +1,1 @@
+init --kdf-memory 256 --kdf-time 3 --accept-weak-password

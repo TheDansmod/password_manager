@@ -1,0 +1,1 @@
+set site password --gen --len 24 --classes luds --symbols "!#%" --no-ambiguous --sensitive

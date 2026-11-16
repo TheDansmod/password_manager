@@ -19,6 +19,8 @@ import tempfile
 # (group name, files, target, hard cap). lib.rs is crate glue and is charged
 # to the cli + main group, the conservative choice (DESIGN_NOTES.md).
 GROUPS = [
+    # M7: cli + main 1,700 and total 4,800 (owner, spec Section 3 table,
+    # 2026-11-15; DESIGN_NOTES, M7).
     ("sys + secmem + alloc", ["sys.rs", "secmem.rs", "alloc.rs"], 400, 800),
     ("crypto + format", ["crypto.rs", "format.rs"], 450, 750),
     ("store", ["store.rs"], 250, 450),
@@ -26,9 +28,9 @@ GROUPS = [
     # gen cap 200 -> 300: owner approval 2026-11-13 (DESIGN_NOTES, M6).
     ("gen", ["gen.rs"], 150, 300),
     ("term + clip", ["term.rs", "clip.rs"], 300, 350),
-    ("cli + main", ["cli.rs", "main.rs", "lib.rs"], 400, 500),
+    ("cli + main", ["cli.rs", "main.rs", "lib.rs"], 400, 1700),
 ]
-TOTAL_TARGET, TOTAL_CAP = 2200, 3200
+TOTAL_TARGET, TOTAL_CAP = 2200, 4800
 
 
 def strip_cfg_test(text: str) -> str:
