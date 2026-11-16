@@ -21,6 +21,13 @@
 # and T-FUZZ-4 (`fuzz_tokenizer`), T-FUZZ-5 (`fuzz_sanitize`) in
 # `fuzz-smoke`. The `strength` feature and `zxcvbn` are gone (DESIGN_NOTES,
 # M7).
+# M8: in `e2e`, T-MEM-4 (tests/mem.rs, memtest build, canary scan through
+# /proc/<pid>/mem, under xvfb-run so the clipboard exception is exercised)
+# and T-MIG-1 .. T-MIG-3 plus T-E2E-10's real pipe (tests/mig.rs) with the
+# real gpg and a fixture written by the original encrypted_pw_mgr.py
+# (PWV_REQUIRE_GPG makes that mandatory), plus an "M8 gate by name" step.
+# In `test`, both files run in every configuration (mem.rs only does
+# something in memtest builds; mig.rs uses its stand-in gpg there).
 # Every gate of the milestones done so far runs on every push, so no local
 # nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
 # as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
@@ -54,6 +61,11 @@ env:
   # `compat`: reference implementations for the independent golden check.
   PY_ARGON2_CFFI_VERSION: "23.1.0"
   PY_PYNACL_VERSION: "1.5.0"
+  # M8, T-MIG-1: the legacy program's own imports, to write the fixture
+  # with the original encrypted_pw_mgr.py (tests/legacy/make_fixture.py).
+  PY_GNUPG_VERSION: "0.5.7"
+  PY_RICH_VERSION: "15.0.0"
+  PY_PYPERCLIP_VERSION: "1.11.0"
 
 jobs:
   lint:
@@ -201,16 +213,43 @@ jobs:
     # clipboard tests cannot pass vacuously. T-MEM-* stay in `test` and
     # `coredump`. Measured 6m02 (M7 round 1).
     # The test commands run under scripts/ci_guard.sh (see `test`).
+    # M8 adds T-MEM-4 and T-MIG (provisional: about 2 min more locally;
+    # cap unchanged until measured).
     runs-on: ubuntu-26.04
     timeout-minutes: 19
     env:
       PWV_REQUIRE_X11: "1"
+      PWV_REQUIRE_GPG: "1"
     steps:
       - uses: actions/checkout@v5
-      - name: Install Xvfb and xclip
+      - name: Install Xvfb, xclip, and GnuPG
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xclip
+          sudo apt-get install -y xvfb xclip gnupg
+          gpg --version | head -1
+      - name: Legacy program's Python imports (T-MIG-1 fixture)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/legacy"
+          "$RUNNER_TEMP/legacy/bin/pip" install "python-gnupg==$PY_GNUPG_VERSION" \
+            "rich==$PY_RICH_VERSION" "pyperclip==$PY_PYPERCLIP_VERSION"
+          echo "PWV_LEGACY_PYTHON=$RUNNER_TEMP/legacy/bin/python" >> "$GITHUB_ENV"
+      - name: T-MEM-4 (memtest), T-MIG, T-E2E-10 with the real gpg
+        run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --features memtest --test mem --test mig 2>&1 | tee m8.txt
+      - name: M8 gate by name (one line each in the log)
+        run: |
+          for t in scan::t_mem_4_canary_scan_mid_session_and_after_lock \
+              scan::t_mem_4_signal_eof_and_idle_exits_are_wiped \
+              scan::exit_pause_needs_the_environment_variable \
+              t_mig_1_legacy_fixture_imports_the_expected_model_with_its_warning \
+              t_mig_1_key_case_collision_and_invalid_entries_are_refused \
+              t_mig_1_wrong_legacy_passphrase_imports_nothing \
+              t_mig_1_a_vault_larger_than_the_pipe_buffer_arrives_whole \
+              t_mig_2_malicious_pickle_aborts_and_creates_no_marker \
+              t_mig_2_script_has_no_code_executing_parser \
+              t_mig_3_stdout_must_be_a_pipe \
+              migrate_script_requires_the_vault_argument; do
+            grep -Eq "^test $t \.\.\. ok$" m8.txt || { echo "missing: $t"; exit 1; }
+          done
       - name: T-E2E, T-CLIP (default features)
         run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --test cli --test e2e --test clip 2>&1 | tee e2e.txt
       - name: T-E2E without the clipboard feature (copy fails cleanly)
@@ -235,6 +274,7 @@ jobs:
               t_e2e_8_control_and_bidi_characters_are_shown_as_escapes \
               t_e2e_9_rm_needs_the_exact_name_and_there_is_no_export \
               t_e2e_10_import_valid_invalid_and_tty \
+              t_e2e_10_import_reads_the_pipe_before_asking_for_the_master_password \
               t_e2e_11_passwd_then_only_the_new_password_opens \
               t_e2e_12_no_terminal_is_exit_4 \
               t_cry_2_wrong_password_and_damage_look_the_same \

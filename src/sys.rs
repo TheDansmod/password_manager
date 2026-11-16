@@ -203,6 +203,17 @@ pub fn wait_readable(fd: BorrowedFd<'_>, timeout_ms: Option<u64>) -> Result<bool
     Ok(rustix::event::poll(&mut fds, ts.as_ref())? > 0)
 }
 
+/// `memtest` only (T-MEM-4): sleeps in `poll(2)` for `ms` milliseconds, or
+/// until a signal arrives.
+#[cfg(feature = "memtest")]
+pub fn nap(ms: i64) {
+    let ts = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: ms.clamp(0, 999) * 1_000_000,
+    };
+    let _ = rustix::event::poll(&mut [], Some(&ts));
+}
+
 /// A signal recorded by the handler (Section 9.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {

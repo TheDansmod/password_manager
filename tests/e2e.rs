@@ -644,7 +644,6 @@ fn t_e2e_10_import_valid_invalid_and_tty() {
         (octal(&bytes), "import refused: "),
         (octal(&bytes[..100]), "import refused: "),
         (octal(b"not a body"), "import refused: "),
-        (String::new(), "import refused: "),
     ] {
         let mut p = import(&home, &escapes, &[]);
         assert!(p.expect(want));
@@ -655,6 +654,16 @@ fn t_e2e_10_import_valid_invalid_and_tty() {
     let mut p = import(&home, &octal(&bytes), &[]);
     assert!(p.expect("(entry 0)"), "the refusal names the entry index");
     assert_eq!(p.exit_code(), Some(1));
+    // An empty pipe (the producer failed) is refused as before, and since
+    // M8 before the master password is asked (DESIGN_NOTES, M8).
+    let mut p = Pty::spawn_piped("printf ''", home.command(&["import", "--from-stdin"]));
+    assert!(p.expect("import refused: "));
+    assert_eq!(p.exit_code(), Some(1));
+    assert!(
+        !p.saw("Master password"),
+        "asked for a password for nothing"
+    );
+    assert_eq!(std::fs::read(home.vault()).expect("vault"), before);
     // Valid, with suffix: merged with one save.
     let mut p = import(&home, &valid, &["--on-conflict", "suffix"]);
     assert!(p.expect("Imported 2 entries"));
@@ -675,6 +684,45 @@ fn t_e2e_10_import_valid_invalid_and_tty() {
     run(&mut p, "import");
     quit(p);
     assert_eq!(model(&home, PW), m);
+}
+
+/// Since M8 `import` reads the pipe to its end before it asks for the
+/// master password, because the producer of the pipe (the migration
+/// script's `gpg`) asks for the legacy passphrase on the same terminal.
+#[test]
+fn t_e2e_10_import_reads_the_pipe_before_asking_for_the_master_password() {
+    let home = seeded();
+    let body = body_escapes(&vec![entry("mail", "CANARY-e2e-imp-3")]);
+    // A producer that asks a question on the terminal first.
+    let producer = format!(
+        "{{ stty -echo; printf 'Legacy: ' > /dev/tty; read x < /dev/tty; stty echo; \
+         [ \"$x\" = old-secret ] && printf '{body}'; }}"
+    );
+    let cmd = || home.command(&["import", "--from-stdin"]);
+    let mut p = Pty::spawn_piped(&producer, cmd());
+    assert!(p.expect("Legacy: "));
+    // `pwv` started long ago; it must not have asked yet.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!p.saw("Master password"), "two prompts at once");
+    p.send("old-secret\n");
+    assert!(p.answer("Master password: ", PW));
+    assert!(p.expect("Imported 1 entries"));
+    assert_eq!(p.exit_code(), Some(0));
+    assert!(!p.saw("old-secret") && !p.saw("CANARY-e2e-imp"));
+    // The producer gives up: no master password prompt at all.
+    let before = std::fs::read(home.vault()).expect("vault");
+    let mut p = Pty::spawn_piped(&producer, cmd());
+    assert!(p.answer("Legacy: ", "wrong"));
+    assert!(p.expect("import refused: the pipe delivered nothing"));
+    assert_eq!(p.exit_code(), Some(1));
+    assert!(!p.saw("Master password"));
+    assert_eq!(std::fs::read(home.vault()).expect("vault"), before);
+    // A wrong master password after a good pipe: exit 2, nothing merged.
+    let mut p = Pty::spawn_piped(&producer, cmd());
+    assert!(p.answer("Legacy: ", "old-secret"));
+    assert!(p.answer("Master password: ", PW2));
+    assert_eq!(p.exit_code(), Some(2));
+    assert_eq!(std::fs::read(home.vault()).expect("vault"), before);
 }
 
 // ------------------------------------------------------------ T-E2E-11
