@@ -101,10 +101,15 @@ lower-case words (5 to 24 letters; four contain a hyphen), SHA-256
 `9b7bb4cc2ede3e5573174339e0547c774b67e769cfda1fbbc93038ec66a93320`,
 supplied by the project owner in place of the EFF large list (spec Section
 10.3). Each word carries about 17.65 bits; the 6-word default about 105.9.
+The list is MIT-licensed: Copyright (c) 2012 Rochester Institute of
+Technology. The full licence text is in `src/wordlist.LICENSE`; it must
+accompany any copy of the list, including release artefacts (the binary
+embeds the list).
 
 ## Licence
 
-pwv is released under the MIT licence; see `LICENSE`.
+pwv is released under the MIT licence; see `LICENSE`. The embedded word list
+has its own MIT licence (above). Release files include both.
 
 ## Migrating from `encrypted_pw_mgr.py`
 

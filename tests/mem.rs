@@ -283,6 +283,16 @@ mod scan {
         std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
     }
 
+    /// The X clipboard is one global resource (`xvfb-run` gives the whole
+    /// test binary one display): the tests that copy take turns, as in
+    /// `tests/clip.rs`. Without this, one test's `copy`, `gen`, or expiry
+    /// replaced the selection another test was about to paste.
+    static X: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn turn() -> std::sync::MutexGuard<'static, ()> {
+        X.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// What another X client reads from the CLIPBOARD selection.
     #[allow(
         clippy::disallowed_methods,
@@ -392,6 +402,7 @@ mod scan {
 
     #[test]
     fn t_mem_4_canary_scan_mid_session_and_after_lock() {
+        let _x = turn();
         let clipboard = display();
         let home = seeded();
         let (mut p, arena) = session(&home, "300");
@@ -490,6 +501,7 @@ mod scan {
     /// revealed and copied.
     #[test]
     fn t_mem_4_signal_eof_and_idle_exits_are_wiped() {
+        let _x = turn();
         let clipboard = display();
         let home = seeded();
         for how in ["SIGTERM", "SIGHUP", "eof", "idle"] {

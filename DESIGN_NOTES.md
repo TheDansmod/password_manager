@@ -2553,3 +2553,39 @@ runner, attestation, xvfb under ASan.
   same-repository caveat in the M9 decisions entry stands.
 - **Private vulnerability reporting** is enabled on GitHub (owner);
   `SECURITY.md` points to it.
+
+## 2026-11-17 — M9 CI round 1: `e2e` failed (clipboard race in `tests/mem.rs`)
+
+**Result (owner's report, push run on the M9 branch).** Every push job
+passed except `e2e` (2m01). In its step "T-MEM-4 (memtest), T-MIG,
+T-E2E-10 with the real gpg", `scan::t_mem_4_signal_eof_and_idle_exits_are_wiped`
+panicked at `tests/mem.rs:503`, "C1 is on the clipboard" (the `xclip`
+paste after `copy site password` returned something other than C1). The
+other three `mem` tests and all eight `mig` tests passed. The `mem`
+binary finished in 9.21 s, so the failure came before the `idle`
+iteration (which waits 25 s). The test had passed in M8 CI round 2.
+
+**Cause: two tests share one X clipboard.** `xvfb-run -a` starts one X
+server for the whole `cargo test` command, and libtest runs a binary's
+tests in parallel. Both T-MEM-4 tests copy to the CLIPBOARD selection:
+the canary test copies C1, then `gen` puts C4 there, and the selection is
+cleared when its 5 s timeout runs out. The signal test copies C1 and pastes
+straight away. Any of those events from the other test, happening between
+the signal test's copy and its paste, changes or empties what `xclip`
+reads. `tests/clip.rs` has serialised its tests with a `static X: Mutex`
+since M7; `tests/mem.rs` (M8) never got that lock, and M8 round 2 passed
+because the timing happened to work out. Not a `pwv` defect.
+
+**Fix (test harness only; rule 2: no assertion changed).** `tests/mem.rs`
+gets the same `static X: Mutex<()>` and `turn()` as `tests/clip.rs`, and
+both T-MEM-4 tests hold the guard for their whole run. Cost: the two tests
+now run one after the other, about 40 s locally (from ~30 s), well inside
+`e2e`'s cap of 21 min. The other test binaries run under `xvfb-run`
+one after another (cargo runs binaries sequentially), and the only other
+clipboard use, `t_store_9_read_only_commands_never_write` in `tests/e2e.rs`,
+never reads the clipboard back.
+
+**Verified locally:** `cargo fmt --check`, clippy `-D warnings` (default
+and `memtest`), `cargo test --features memtest --test mem --test eng`
+(all pass, 42 s), `test_ids.py --check`. There is no X server locally, so
+the clipboard branch can only be confirmed on CI.
