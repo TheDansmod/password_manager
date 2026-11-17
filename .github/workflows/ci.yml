@@ -35,9 +35,14 @@
 # tag-triggered release.yml / release-build.yml (attested artefacts),
 # `sanitizers-asan` (T-SAN-1), `test-arm64` (spec 15.3's aarch64 runner),
 # an "M1-M3 gate by name" step checked against `test`'s kept logs, and the
-# Section 14 inventory check in `lint` (scripts/test_ids.py). Later M9
-# rounds add coverage, coverage-branch, coverage-report, mutants,
-# fuzz-long, T-STORE-8 (LazyFS) and T-PERF-1.
+# Section 14 inventory check in `lint` (scripts/test_ids.py).
+# M9 (round 2): `coverage` (spec 14.13: five instrumented configurations,
+# every push), `coverage-branch` (T-COV-5, nightly), `coverage-report`
+# (merge, T-COV-1 .. T-COV-5, the job summary, artefacts, and the badges on
+# pushes to `main`: the only job with `contents: write`), `fuzz-long`
+# (30 min per target, corpus kept, T-COV-6), `perf` (T-PERF-1, nightly),
+# and T-STORE-8 (LazyFS) in `durability`. T-MUT-1 is the weekly
+# workflow mutants.yml.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
@@ -78,6 +83,11 @@ env:
   CARGO_AUDIT_VERSION: "0.23.0"
   TOKEI_VERSION: "15.0.0"
   CARGO_FUZZ_VERSION: "0.13.2"
+  # M9, spec 14.13 (coverage jobs).
+  CARGO_LLVM_COV_VERSION: "0.9.1"
+  # M9, T-STORE-8. Empty: LazyFS's default branch; the job prints the commit
+  # it used, to be pinned here once a run has passed.
+  LAZYFS_REF: ""
   # `compat`: reference implementations for the independent golden check.
   PY_ARGON2_CFFI_VERSION: "23.1.0"
   PY_PYNACL_VERSION: "1.5.0"
@@ -130,6 +140,10 @@ jobs:
         run: python3 -I scripts/loc_budget.py src
       - name: Section 14 test-ID inventory (every named test exists; M9)
         run: python3 -I scripts/test_ids.py --check
+      - name: Coverage report and shared production-code rules self-tests (M9)
+        run: |
+          python3 -I scripts/coverage_report.py --self-test
+          for f in scripts/*.sh; do sh -n "$f"; done
 
   test:
     # M1 gate: T-MEM-1, T-MEM-2, T-MEM-3, T-MEM-5 (release), T-MEM-6, T-ENG-5.
@@ -144,8 +158,8 @@ jobs:
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
     # Measured 48m00 (M6 round 1; M5 round 1 was 1h02m17; M6 round 3 was
-    # 25m38; M8 round 2 was 49m39): T-VAULT-1 runs in all five
-    # configurations.
+    # 25m38; M8 round 2 was 49m39; M9 round 1 was 1h00m08): T-VAULT-1 runs
+    # in all five configurations.
     # M7 round 1: the runner was lost ("lost communication with the
     # server") during the testkdf step, in tests/e2e.rs; the cause is not
     # established (DESIGN_NOTES, M7 CI round 1). Since then the five
@@ -156,7 +170,7 @@ jobs:
     # the coverage report's test-ID table, spec 14.13 item 5), and the
     # IDs that no other step names are checked by name in those logs.
     runs-on: ubuntu-26.04
-    timeout-minutes: 149
+    timeout-minutes: 181
     steps:
       - uses: actions/checkout@v5
       - run: mkdir -p logs
@@ -170,12 +184,12 @@ jobs:
         run: sh scripts/ci_guard.sh cargo test --locked --features testkdf 2>&1 | tee logs/testkdf.txt
       - name: Debug, memtest + testkdf (T-MEM-7 zero-before-munmap on a locked region)
         run: sh scripts/ci_guard.sh cargo test --locked --features memtest,testkdf 2>&1 | tee logs/memtest-testkdf.txt
-      - name: M1-M3 gate by name, from the logs above (M9; scripts/test_ids.py)
+      - name: M1-M3 (and M9 T-COV-3) gate by name, from the logs above (M9; scripts/test_ids.py)
         # Every named test of these IDs must have an `ok` line in the five
         # configurations' logs and no `FAILED` line.
         run: >-
           python3 -I scripts/test_ids.py --require
-          T-KAT-1,T-KAT-2,T-COMPAT-1,T-FMT-1,T-FMT-2,T-FMT-3,T-FMT-4,T-CRY-1,T-CRY-2,T-CRY-3,T-CRY-4,T-CRY-5,T-CRY-6,T-MEM-1,T-MEM-2,T-MEM-3,T-MEM-5,T-MEM-6,T-MEM-7,T-FUZZ-3,T-ENG-2,T-ENG-3,T-ENG-4
+          T-KAT-1,T-KAT-2,T-COMPAT-1,T-FMT-1,T-FMT-2,T-FMT-3,T-FMT-4,T-CRY-1,T-CRY-2,T-CRY-3,T-CRY-4,T-CRY-5,T-CRY-6,T-MEM-1,T-MEM-2,T-MEM-3,T-MEM-5,T-MEM-6,T-MEM-7,T-FUZZ-3,T-ENG-2,T-ENG-3,T-ENG-4,T-COV-3
           --logs logs/*.txt
       - name: M4 gate by name (T-STORE-1 .. T-STORE-7, T-STORE-9; one line each in the log)
         # The steps above already run these in every configuration; this
@@ -239,6 +253,9 @@ jobs:
           PWV_FOREIGN_DIR=/mnt/pwv-vfat cargo test --locked --test store \
             -- --exact t_store_1_foreign_fs_real_mount 2>&1 | tee out.txt
           grep -q "test result: ok. 1 passed" out.txt
+          for t in t_store_1_foreign_fs_real_mount; do
+            grep -Eq "^test $t \.\.\. ok$" out.txt || { echo "missing: $t"; exit 1; }
+          done
       - name: Keep the test logs (no secrets by design, rule 9)
         if: always()
         uses: actions/upload-artifact@v6
@@ -254,9 +271,9 @@ jobs:
     # and T-ENG-7 (no PWV_MEMTEST / PWV_TESTKDF in the artefact; positive
     # control on a memtest,testkdf build). scripts/release_build.sh is the
     # same script the tag-triggered release workflow runs.
-    # Provisional cap 30 until measured (three release builds).
+    # Measured 1m25 (M9 round 1); the 10 min floor applies.
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - name: T-REPRO-1, T-ENG-7, hardening
@@ -272,7 +289,8 @@ jobs:
     # `coredump`. Measured 6m02 (M7 round 1).
     # The test commands run under scripts/ci_guard.sh (see `test`).
     # Measured 6m19 (M7 round 2). With M8's T-MEM-4 and T-MIG: 6m41
-    # (M8 round 2).
+    # (M8 round 2); 6m22 (M9 round 1). M9: the two logs are kept as the
+    # artefact `e2e-logs` for the coverage report's test-ID table.
     runs-on: ubuntu-26.04
     timeout-minutes: 21
     env:
@@ -349,6 +367,15 @@ jobs:
               fuzz_corpus_seeds_are_committed; do
             grep -Eq "^test $t \.\.\. ok$" e2e.txt || { echo "missing: $t"; exit 1; }
           done
+      - name: Keep the e2e logs (no secrets by design, rule 9)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-logs
+          path: |
+            m8.txt
+            e2e.txt
+          retention-days: 30
 
   compat:
     # T-COMPAT-1, independent half: the golden vaults decrypt to the manifest
@@ -382,7 +409,8 @@ jobs:
     # T-FUZZ-5 (M7, sanitize): 60 s per target, ASan, on every push.
     # Invariants (Section 14.10): no panic, no allocation above 64 MiB,
     # no input slower than 1 s, round-trip identity (asserted in-target).
-    # Slowest target measured 2m37 (M6 round 1); the 10 min floor applies.
+    # Slowest target measured 2m37 (M6 round 1), 2m38 (M9 round 1); the
+    # 10 min floor applies.
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
@@ -719,17 +747,83 @@ jobs:
   durability:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), nightly and on "run now" (every
-    # push until M9), against the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
+    # push until M9), against the runner's ext4 disk.
     # Measured 3m24 (M6 round 1), 4m07 (M8 round 2).
+    # M9: T-STORE-8, the same kill loop on a LazyFS mount with a simulated
+    # power loss (`lazyfs::clear-cache`: unsynced data dropped) after every
+    # kill, 5,000 iterations; built from source (scripts/lazyfs.sh).
+    # Provisional cap 60 until measured.
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 13
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)
         env:
           PWV_T_STORE_3_ITERATIONS: "5000"
         run: cargo test --locked --release --test store -- --exact t_store_3_kill_loop --nocapture
+      - name: Install FUSE 3 and LazyFS's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev cmake g++
+          # LazyFS's mount script passes -o allow_other.
+          grep -q '^user_allow_other' /etc/fuse.conf || echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - name: Build and mount LazyFS
+        run: sh scripts/lazyfs.sh "$RUNNER_TEMP/lazyfs"
+      - name: T-STORE-8 kill loop with power loss, 5,000 iterations (release)
+        env:
+          PWV_REQUIRE_LAZYFS: "1"
+          PWV_T_STORE_8_ITERATIONS: "5000"
+        run: >-
+          cargo test --locked --release --test store --
+          --exact t_store_8_kill_loop_with_power_loss --nocapture 2>&1 | tee store8.txt
+      - name: T-STORE-8 gate by name
+        # A single test run with --nocapture prints its name, then its
+        # summary line, then `ok`: check each part.
+        run: |
+          for t in t_store_8_kill_loop_with_power_loss; do
+            grep -Eq "^test $t \.\.\. " store8.txt || { echo "missing: $t"; exit 1; }
+          done
+          grep -q "T-STORE-8: seed .*, 5000 kills" store8.txt
+          grep -q "test result: ok. 1 passed" store8.txt
+      - name: LazyFS log (on failure)
+        if: failure()
+        run: tail -n 100 "$RUNNER_TEMP/lazyfs/lazyfs.log" || true
+
+  perf:
+    # T-PERF-1 (spec 14.12; owner decision 4, M9): unlock at the default
+    # parameters <= 3 s, a save of 1,000 entries on tmpfs (/dev/shm, so
+    # "excluding fsync") <= 50 ms, allocator overhead <= 5 % (in-process
+    # benchmark, System vs ZeroizingAlloc::new(false)); medians, release
+    # build, one test thread, nightly. The runner is recorded in the log.
+    # Locally (2026-11-17): 0.285 s, 0.39 ms, about +-0.2 %.
+    # Provisional cap 20 until measured.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Reference runner
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          free -m
+          stat -f -c '/dev/shm: %T' /dev/shm
+      - name: T-PERF-1 (release)
+        env:
+          PWV_PERF: "1"
+          PWV_PERF_TMPFS: /dev/shm
+        run: cargo test --locked --release --test perf -- --test-threads=1 2>&1 | tee perf.txt
+      - name: T-PERF-1 gate by name
+        run: |
+          for t in t_perf_1_unlock_at_default_parameters \
+              t_perf_1_save_1000_entries_on_tmpfs t_perf_1_allocator_overhead; do
+            grep -Eq "^test $t \.\.\. " perf.txt || { echo "missing: $t"; exit 1; }
+          done
+          for m in "T-PERF-1 unlock" "T-PERF-1 save" "T-PERF-1 allocator"; do
+            grep -q "$m" perf.txt || { echo "no measurement: $m"; exit 1; }
+          done
+          grep -q "test result: ok. 3 passed" perf.txt
 
   coredump:
     # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner
@@ -797,3 +891,288 @@ jobs:
         run: cargo deny --locked check
       - name: cargo audit
         run: cargo audit --deny warnings
+
+  coverage:
+    # Spec 14.13 (M9): line, region and function coverage of the whole test
+    # suite on the pinned stable toolchain (llvm-tools from
+    # rust-toolchain.toml), one job per configuration of `test`, merged by
+    # `coverage-report`. The PTY tests' `pwv` children are instrumented and
+    # write their own profiles. The two display runs execute T-E2E, T-CLIP
+    # and T-MEM-4's clipboard branch under xvfb-run, and T-MIG with the real
+    # gpg (as `e2e` does); the others run without a display, so the "no
+    # clipboard" paths are measured too. Fixed seeds (determinism). Release
+    # builds, Miri, sanitizers, fuzzing, mutants and `durability` are not
+    # included (spec). Provisional cap 90 until measured.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: default, args: "", display: true }
+          - { name: memtest, args: "--features memtest", display: true }
+          - { name: no-default-features, args: "--no-default-features", display: false }
+          - { name: testkdf, args: "--features testkdf", display: false }
+          - { name: memtest-testkdf, args: "--features memtest,testkdf", display: false }
+    name: coverage (${{ matrix.name }})
+    env:
+      PROPTEST_RNG_SEED: "20261117"
+      PWV_T_STORE_3_SEED: "0x5eed5eed5eed5eed"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain (with llvm-tools) and cargo-llvm-cov
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install --locked cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
+      - name: Install Xvfb, xclip, GnuPG and the legacy program's imports
+        if: ${{ matrix.display }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip gnupg
+          python3 -m venv "$RUNNER_TEMP/legacy"
+          "$RUNNER_TEMP/legacy/bin/pip" install "python-gnupg==$PY_GNUPG_VERSION" \
+            "rich==$PY_RICH_VERSION" "pyperclip==$PY_PYPERCLIP_VERSION"
+          {
+            echo "PWV_LEGACY_PYTHON=$RUNNER_TEMP/legacy/bin/python"
+            echo "PWV_REQUIRE_X11=1"
+            echo "PWV_REQUIRE_GPG=1"
+          } >> "$GITHUB_ENV"
+      - name: Instrumented test suite (${{ matrix.name }})
+        run: |
+          xvfb=""
+          if [ "${{ matrix.display }}" = true ]; then xvfb="xvfb-run -a"; fi
+          sh scripts/ci_guard.sh $xvfb sh scripts/coverage_run.sh \
+            "cov/coverage-${{ matrix.name }}" "${{ matrix.name }}" ${{ matrix.args }}
+      - name: Keep the coverage data
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-${{ matrix.name }}
+          path: cov/coverage-${{ matrix.name }}/
+          retention-days: 30
+
+  coverage-branch:
+    # T-COV-5 (spec 14.13): branch coverage needs nightly (`--branch`); the
+    # same five configurations as `coverage`, nightly and on "Run
+    # workflow". The report records the exact nightly version. Provisional
+    # cap 90 until measured.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: default, args: "", display: true }
+          - { name: memtest, args: "--features memtest", display: true }
+          - { name: no-default-features, args: "--no-default-features", display: false }
+          - { name: testkdf, args: "--features testkdf", display: false }
+          - { name: memtest-testkdf, args: "--features memtest,testkdf", display: false }
+    name: coverage-branch (${{ matrix.name }})
+    env:
+      PROPTEST_RNG_SEED: "20261117"
+      PWV_T_STORE_3_SEED: "0x5eed5eed5eed5eed"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly (with llvm-tools) and cargo-llvm-cov
+        run: |
+          rustup toolchain install nightly --profile minimal --component llvm-tools
+          rustup show active-toolchain || rustup toolchain install
+          cargo install --locked cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
+      - name: Install Xvfb, xclip, GnuPG and the legacy program's imports
+        if: ${{ matrix.display }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip gnupg
+          python3 -m venv "$RUNNER_TEMP/legacy"
+          "$RUNNER_TEMP/legacy/bin/pip" install "python-gnupg==$PY_GNUPG_VERSION" \
+            "rich==$PY_RICH_VERSION" "pyperclip==$PY_PYPERCLIP_VERSION"
+          {
+            echo "PWV_LEGACY_PYTHON=$RUNNER_TEMP/legacy/bin/python"
+            echo "PWV_REQUIRE_X11=1"
+            echo "PWV_REQUIRE_GPG=1"
+          } >> "$GITHUB_ENV"
+      - name: Instrumented test suite with branches (${{ matrix.name }})
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: |
+          rustc -V
+          xvfb=""
+          if [ "${{ matrix.display }}" = true ]; then xvfb="xvfb-run -a"; fi
+          sh scripts/ci_guard.sh $xvfb sh scripts/coverage_run.sh --branch \
+            "cov/branchcov-${{ matrix.name }}" "${{ matrix.name }}" ${{ matrix.args }}
+      - name: Keep the branch coverage data
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: branchcov-${{ matrix.name }}
+          path: cov/branchcov-${{ matrix.name }}/
+          retention-days: 30
+
+  fuzz-long:
+    # Spec 14.10 / 15.3: 30 min per target, nightly, seeded by the committed
+    # corpus and by the previous night's corpus (actions/cache, restored by
+    # prefix; the newest wins), which is saved again and kept as an artefact.
+    # Same invariants and limits as `fuzz-smoke`. Every crash becomes a
+    # regression unit test before it is fixed. Then T-COV-6 (report-only):
+    # region coverage of `format` and `vault` replaying the corpus (`cargo
+    # fuzz coverage`), compared with the previous night's figure.
+    # Provisional cap 60 until measured.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      ASAN_OPTIONS: quarantine_size_mb=32:detect_leaks=1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: fuzz_header, features: "" }
+          - { target: fuzz_body, features: "" }
+          - { target: fuzz_open, features: "--features testkdf" }
+          - { target: fuzz_import, features: "" }
+          - { target: fuzz_tokenizer, features: "" }
+          - { target: fuzz_sanitize, features: "" }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly (with llvm-tools) and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal --component llvm-tools
+          cargo +nightly install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
+      - name: Restore the previous night's corpus and T-COV-6 figures
+        uses: actions/cache/restore@v4
+        with:
+          path: long
+          key: fuzz-long-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-long-${{ matrix.target }}-
+      - name: Fuzz ${{ matrix.target }} for 30 min
+        run: |
+          mkdir -p long/corpus
+          ls long/corpus | wc -l
+          cargo +nightly fuzz run ${{ matrix.features }} ${{ matrix.target }} long/corpus \
+            fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=1800 -rss_limit_mb=256 -malloc_limit_mb=64 \
+            -timeout=1 -max_len=24576
+          ls long/corpus | wc -l
+      - name: T-COV-6 corpus coverage (report-only)
+        run: |
+          cargo +nightly fuzz coverage ${{ matrix.features }} ${{ matrix.target }} long/corpus \
+            fuzz/corpus/${{ matrix.target }}
+          bin=$(find target -path '*coverage*' -type f -name '${{ matrix.target }}' -perm -u+x | head -n 1)
+          llvm_cov="$(rustc +nightly --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-cov"
+          "$llvm_cov" export -format=text \
+            -instr-profile="fuzz/coverage/${{ matrix.target }}/coverage.profdata" "$bin" > export.json
+          python3 -I scripts/fuzz_cov.py ${{ matrix.target }} export.json tcov6.json \
+            long/tcov6.json >> "$GITHUB_STEP_SUMMARY"
+          cp tcov6.json long/tcov6.json
+      - name: Save the corpus and figures for the next night
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: long
+          key: fuzz-long-${{ matrix.target }}-${{ github.run_id }}
+      - name: Keep the corpus
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-long-corpus-${{ matrix.target }}
+          path: long/
+          retention-days: 30
+      - name: Upload crash artefacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: fuzz-long-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  coverage-report:
+    # Spec 14.13 (M9): after every coverage run, merges them (by line, and
+    # regions, functions and branches by source span; scripts/
+    # coverage_report.py), checks T-COV-1 .. T-COV-5 against
+    # coverage/baseline.json and DESIGN_NOTES' "Coverage exceptions", and
+    # writes the job summary: tables per Section 3 group and file, the
+    # T-COV-3 list of `unsafe` blocks, the uncovered lines of the gated
+    # modules, toolchains and seeds, and every Section 14 test ID with its
+    # status (test logs of `test`, `e2e` and the coverage runs, plus the
+    # result of each job named as evidence). Artefacts kept 30 days.
+    # Waits for every job of the run (nightly ones are skipped on pushes).
+    # The only job with `contents: write` (spec 14.13; owner decision 3):
+    # it pushes two SVG badges to the orphan `badges` branch, and only on
+    # pushes to `main`. Provisional cap 15 until measured.
+    needs:
+      - lint
+      - test
+      - release-check
+      - e2e
+      - compat
+      - fuzz-smoke
+      - sanitizers
+      - sanitizers-asan
+      - test-arm64
+      - durability
+      - perf
+      - coredump
+      - supply
+      - coverage
+      - coverage-branch
+      - fuzz-long
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Download the coverage runs
+        uses: actions/download-artifact@v6
+        with:
+          pattern: coverage-*
+          path: runs/coverage
+      - name: Download the branch coverage runs (nightly only)
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          pattern: branchcov-*
+          path: runs/branch
+      - name: Download the test logs
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          pattern: "*-logs"
+          path: logs
+      - name: Coverage report (T-COV-1 .. T-COV-5) and test-ID table
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$NEEDS" > needs.json
+          mkdir -p out
+          status=0
+          python3 -I scripts/coverage_report.py --runs runs/coverage --branch-runs runs/branch \
+            --baseline coverage/baseline.json --notes DESIGN_NOTES.md --jobs needs.json \
+            --summary "$GITHUB_STEP_SUMMARY" --merged-lcov out/merged.lcov \
+            --new-baseline out/baseline-candidate.json --badges out/badges \
+            --logs $(find logs -name '*.txt') || status=$?
+          echo "COVERAGE_STATUS=$status" >> "$GITHUB_ENV"
+      - name: Keep the report (merged LCOV, baseline candidate, badges)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: out/
+          retention-days: 30
+      - name: Push the badges to the orphan `badges` branch (pushes to main only)
+        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd out/badges
+          git init -q -b badges
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add coverage.svg test-ids.svg
+          git commit -q -m "Badges for $GITHUB_SHA"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+      - name: Gates
+        run: exit "${COVERAGE_STATUS:-1}"

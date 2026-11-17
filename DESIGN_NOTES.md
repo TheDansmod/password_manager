@@ -2589,3 +2589,293 @@ never reads the clipboard back.
 and `memtest`), `cargo test --features memtest --test mem --test eng`
 (all pass, 42 s), `test_ids.py --check`. There is no X server locally, so
 the clipboard branch can only be confirmed on CI.
+
+## 2026-11-17 — M9 CI round 1: push results; M9 round 2 contents
+
+**Push run on the M9 branch (owner's report, 2026-11-17).** After the
+`e2e` fix above, every push job passed: `test` 1h00m08, `e2e` 6m22,
+`supply` 5m22, `fuzz-smoke` 1m50 to 2m38, `lint` 1m49, `coredump` 1m26,
+`release-check` 1m25 (so T-REPRO-1, link hardening and T-ENG-7 passed on
+CI), `compat` 10 s. The nightly set was started by the owner; its results
+are still to come.
+
+Caps from these times (3x the slowest measurement, floor 10): `test`
+149 → 181 (3 x 60m08; it took 49m39 in M8 round 2), `release-check`
+30 (provisional) → 10. The others stay (their 3x of earlier, slower runs
+is larger). In `scripts/test_ids.py`, T-ENG-7 and T-REPRO-1 are now
+`("job", "release-check ...")`; T-SAN-1 is `("job", "sanitizers-asan")`
+and counts once that nightly job reports.
+
+**Round 2 (this entry) implements the rest of M9's tooling**, as one CI
+round (owner preference): coverage (T-COV-1 .. T-COV-6), T-MUT-1, T-STORE-8,
+T-PERF-1, `fuzz-long`, the documents, and the Section 13 verification.
+`src/` is unchanged (LOC 4,478 / 4,800). Every Section 14 ID now has an
+implementation (`test_ids.py --check`: 0 to do).
+
+### Coverage (spec 14.13)
+
+- **Shared definition of production code.** The `#[cfg(test)]` item
+  stripping moved unchanged from `loc_budget.py` into `scripts/prodcode.py`
+  (generalised to any `#[cfg(...)]` marker); `loc_budget.py` imports it and
+  prints the same table as before (4,478). The coverage report uses the
+  same module: production lines are code lines of `src/*.rs` outside
+  `#[cfg(test)]` and `#[cfg(miri)]` items. Only two `#[cfg(miri)]` items
+  exist (`sys.rs`'s Miri `map` and `unmap`); the report lists them as
+  excluded. **Interpretation:** a line counts if it is a production line
+  *and* LLVM instruments it (comments, blank lines, and lines with no
+  executable code have no counter). My line classifier differs from
+  tokei's count by at most 7 lines per file (multi-line string literals);
+  it does not matter, since only instrumented lines count.
+- **Runs** (`coverage` job, every push): one job per configuration of
+  `test` (default, `memtest`, `--no-default-features`, `testkdf`,
+  `memtest,testkdf`), each `scripts/coverage_run.sh` = `cargo llvm-cov
+  --no-report --no-fail-fast` over every target, then LCOV, JSON and HTML
+  exports. The default and `memtest` runs have a display (`xvfb-run`,
+  `PWV_REQUIRE_X11`) and the real `gpg` with the legacy program's Python
+  (`PWV_REQUIRE_GPG`), so T-E2E, T-CLIP, T-MEM-4's clipboard branch and
+  T-MIG run as in `e2e`; the other three have no display, so the "no
+  clipboard" paths are measured too. Release builds, Miri, sanitizers,
+  fuzzing, mutants and `durability` are not included (spec).
+- **Child processes:** cargo-llvm-cov 0.9.1 (source read) sets
+  `LLVM_PROFILE_FILE=<target>/pwv-%p-%m.profraw`; children inherit it
+  (no `env_clear` in the harness), and `pwv` exits through
+  `std::process::exit`, which writes the profile.
+- **Determinism:** `PROPTEST_RNG_SEED=20261117` and
+  `PWV_T_STORE_3_SEED=0x5eed5eed5eed5eed` in the coverage jobs. proptest
+  1.12's `Config::with_cases` keeps the environment-derived defaults
+  (source read), so the seed reaches every runner natively; case counts
+  are fixed in the tests. Normal runs are unchanged (no test edit needed).
+  Timing-dependent paths (where a SIGKILL lands) can still vary a little.
+- **Merging** (`scripts/coverage_report.py`): the spec allows splitting
+  across jobs and merging by line. Lines: covered if any run executed
+  them. **Interpretation:** regions, functions and branches are merged the
+  same way, keyed by their exact source span (the source is the same in
+  every run; a span compiled only under some features is counted once);
+  a function is identified by the span of its first region. Per-job HTML
+  reports are kept as artefacts.
+- **T-COV-3:** the list of `unsafe` blocks comes from T-ENG-2's own scanner:
+  new `tests/eng.rs` test `t_cov_3_unsafe_blocks_listed` (with the
+  self-test `selftest_unsafe_uses`) classifies every `unsafe` token on the
+  same stripped lines as a block (extent by brace matching) or a
+  declaration, fails on anything else, and with `PWV_UNSAFE_BLOCKS=<path>`
+  writes `file, first, last` per block. 23 blocks today. A block is
+  "fully covered" if every code region starting in it and every
+  instrumented line in it ran; blocks inside `#[cfg(miri)]` items are
+  listed as excluded.
+- **Gates:** T-COV-1 (lines ≥ 95 % in `format`, `crypto`, `gen`, `store`,
+  `vault`; ≥ 85 % overall), T-COV-2 (every function of those five, unless
+  listed below), every uncovered line of the five listed with
+  "justified: yes/no" (an unjustified one fails), T-COV-3, T-COV-4
+  (no file more than 0.5 pp below `coverage/baseline.json` in lines or
+  regions; branches too once the baseline has them, T-COV-5).
+  **"Module" = source file** (the five gated modules are one file each).
+- **First run: `coverage-report` will fail, by design.** There is no
+  baseline yet (no local `llvm-tools`), and the uncovered lines are not
+  yet known, let alone justified. The job uploads
+  `baseline-candidate.json`; after the owner reports the figures, the
+  next round commits `coverage/baseline.json` (a deliberate commit with a
+  dated entry, as T-COV-4 requires), adds tests for uncovered lines or
+  lists them under "Coverage exceptions" below.
+- **Report:** job summary with the five items of 14.13 (tables per
+  Section 3 group and file, T-COV-3 list, uncovered lines, toolchains and
+  seeds, every test ID with milestone and status). Test-ID statuses come
+  from `test`'s and `e2e`'s kept logs plus the coverage runs' logs, and,
+  for evidence that is a job, from that job's result (`toJSON(needs)`);
+  a job skipped in the run (nightly-only, on a push) counts as not run.
+  `test_ids.py` gained `verdicts()` (used by `--logs` and the report) and a
+  4-field test evidence `("test", file, name, job)` for tests that act
+  only in one job (T-STORE-8, T-PERF-1: elsewhere they return at once, so
+  their `ok` lines prove nothing).
+- **Badges:** `coverage.svg` (overall line coverage) and `test-ids.svg`
+  (IDs passing out of 81), rendered by the report script, pushed by
+  `coverage-report` to an orphan `badges` branch only on pushes to `main`
+  (checkout with `persist-credentials: false`; the token is used in that
+  one step). `coverage-report` is the only job with `contents: write`. On a
+  push run the nightly gates count as not run, so the test-ID badge shows
+  fewer than 81 there.
+- **Branch coverage (T-COV-5):** `coverage-branch`, nightly, the same five
+  runs on nightly with `--branch`; the report adds a branch column and
+  records the nightly version in the seeds/toolchain list.
+- Local checks: report self-test (parsers, exception table, badge) and an
+  end-to-end run on synthetic data (two half-covered runs merge to 100 %,
+  a planted uncovered line is listed as unjustified, a planted test
+  failure shows as `fail`, a baseline 0.6 pp above fails T-COV-4 and one
+  0.4 pp above passes). **Not run locally:** cargo-llvm-cov itself
+  (no `llvm-tools` in the sandbox).
+
+### T-MUT-1 (weekly workflow `mutants.yml`)
+
+- Separate workflow (weekly cron, and "Run workflow"), so its schedule
+  cannot trigger `ci.yml`'s nightly jobs. 13 jobs: `format` 3 shards,
+  `crypto` 1, `gen` 2, `store` 3, `vault` 4 (`--shard k/n`, 0-based).
+- `scripts/mutants.sh` (owner decision 6): **pass 1** this shard's mutants
+  of `src/<module>.rs` against `--lib` plus the module's own test files
+  (`format`: format, format_alloc; `crypto`: crypto, kdf_region; others:
+  their file), default features, the two kill loops skipped. **Pass 2**:
+  every survivor (missed or timed out) against the full suite, default
+  features. **Pass 3**: those still missed against the full suite with
+  `memtest,testkdf`. Passes 2 and 3 re-run exactly the survivors: every
+  other mutant of the file is written to `previously_caught.txt` and
+  `--iterate` skips it (cargo-mutants 27.1.0 book, "iterate"). What
+  survives pass 3 must be justified below ("Surviving mutants"; checked by
+  `scripts/mutants_check.py`).
+- **Interpretations (rule 10):** a mutant that times out in pass 3 counts
+  as caught (it hangs the suite, which any run notices). `--cap-lints true`
+  so that the crate's `deny` lints do not make mutants unviable.
+  Feature-gated code: `memtest`-only code is judged by pass 3; `testkdf`
+  constants by pass 3 (the production ones by passes 1 and 2). There is no
+  `cfg(miri)` code in the five modules, so nothing is excluded for that.
+- `store` jobs mount LazyFS, so T-STORE-8 runs in passes 2 and 3: the M4
+  note expects the temp-file `fsync` mutant to be killable only by a power
+  loss. Directory `fsync` mutants may still survive: LazyFS passes
+  metadata operations (rename, link) straight through, so it cannot lose
+  a rename. To be judged when the first run reports.
+- **Local trial** (2026-11-17, `crypto`, shard 0/4, pass 1 only): 9
+  mutants in 6 min (baseline 5 s build + 82 s tests): 5 caught, 3
+  unviable, 1 missed: `src/crypto.rs:197:69: replace == with != in
+  argon2_in_region`, which is inside `#[cfg(feature = "memtest")]`
+  (compiled out in pass 1; T-MEM-7's memtest test should catch it in
+  pass 3). This is the case the full-suite passes exist for.
+- Trap found: cargo-mutants builds its copy of the tree in the shared
+  target directory, after which cargo considered an old test binary of
+  the real tree fresh (it ran tests from before an edit). `touch` of the
+  sources fixed it. Locally only; CI jobs are fresh.
+- README "Releasing": a tag needs a green `mutants.yml` run on the commit.
+
+### T-STORE-8 (LazyFS, nightly `durability`)
+
+- `scripts/lazyfs.sh` clones github.com/dsrhaslab/lazyfs (ref
+  `LAZYFS_REF`; empty = default branch, and the job prints the commit:
+  **pin it after the first green run**), builds `libs/libpcache` and
+  `lazyfs`, copies LazyFS's own `config/default.toml` changing only
+  `fifo_path`, and mounts with its `scripts/mount-lazyfs.sh` (needs
+  `user_allow_other`). Written without access to the repository (the
+  sandbox cannot reach GitHub): its layout and commands are from my
+  knowledge of LazyFS and are **unverified** until CI runs it.
+- `tests/store.rs`: T-STORE-3's loop is now `kill_loop(fixture, id,
+  lazy)` (rule 2: T-STORE-3's assertions and defaults are unchanged; its
+  environment variables keep their names). New
+  `t_store_8_kill_loop_with_power_loss`: the vault and state live on the
+  mount, and after every SIGKILL the test sends `lazyfs::clear-cache`
+  (unsynced data dropped: a power loss) before T-STORE-3's checks (opens;
+  generation is the last reported commit or one more; content matches;
+  fresh; backups decrypt to their generations; no temp files).
+- Non-vacuity and synchronisation: before each command a probe file is
+  written without `fsync`; after the command it must lose its data
+  (within 60 s), which shows the clear took effect and that the mount
+  really drops unsynced data. An optional `PWV_LAZYFS_DONE` FIFO is
+  supported but not used (unsure which commands LazyFS confirms).
+- `store` refuses FUSE mounts: the test checks that refusal first, then
+  uses the `--allow-foreign-fs` override (`Store::open(.., true)`), which
+  waives only the `statfs` check; owner and mode are still enforced. The
+  child gets `PWV_T_FOREIGN=1`. `PWV_REQUIRE_LAZYFS` makes a missing mount
+  a failure in CI. 5,000 iterations nightly; provisional cap 60.
+
+### T-PERF-1 (`tests/perf.rs`, nightly `perf`)
+
+- Owner decision 4. Three tests, active only with `PWV_PERF=1` (release,
+  one test thread): unlock at the default parameters (Argon2id 256 MiB,
+  t = 3, then unwrap and decrypt), median of 5, ≤ 3 s; a save of 1,000
+  entries on tmpfs (serialise, encrypt, `Store::save` with its
+  `fsync`s, renames, backups and state file; the directory must be tmpfs,
+  checked by `statfs`; CI uses `/dev/shm`), median of 11, ≤ 50 ms; the
+  allocator overhead, ≤ 5 %.
+- **Allocator benchmark, in process:** the test crate's global allocator
+  is a switch that frees through T-MEM-6's verifying `ZeroizingAlloc`
+  by default, and during the benchmark through `System` or
+  `ZeroizingAlloc::new(false)` (what `main.rs` installs). Every mode
+  allocates from and frees to `System`, so a block may change mode
+  between allocation and free. T-MEM-6 holds for this crate outside the
+  benchmark (and `tests/eng.rs`'s check still finds the verifying
+  allocator). Workload: a 1,000-entry model built as owned strings,
+  serialised, encrypted, decrypted, parsed back and compared, 200 times
+  per run (about 0.3 s); System and zeroizing alternate, 9 runs each,
+  medians compared. **Interpretation:** the spec's "on the test suite's
+  wall time" is read as this representative workload (owner decision 4).
+- Local results (release): unlock 0.285 s; save 0.39 ms; allocator
+  overhead +0.18 %, −0.13 %, −0.02 % in three runs. With 20 iterations per
+  run (31 ms) the overhead swung between −1 % and +4 %, so runs were made
+  10x longer. In a debug build the overhead was 5.3 %: the gate is the
+  release build, which the nightly job uses.
+
+### `fuzz-long` and T-COV-6
+
+- Nightly, 30 min per target, the `fuzz-smoke` limits and ASan options,
+  seeded by the committed corpus and the previous night's corpus
+  (`actions/cache` restore by prefix, saved under a per-run key), corpus
+  kept as an artefact. Then `cargo fuzz coverage` over that corpus,
+  `llvm-cov export`, and `scripts/fuzz_cov.py`: region coverage of
+  `format.rs` and `vault.rs` (production regions) per target, compared with
+  the previous night's figure from the cache; a drop of more than 2 pp is
+  a warning, never a failure (report-only). Paths checked in cargo-fuzz
+  0.13.2's source (`fuzz/coverage/<target>/coverage.profdata`; the binary
+  is found with `find`).
+
+### Documents, Section 13
+
+- README: CI, coverage and test-ID badges (`<owner>` placeholders: the
+  owner's GitHub name is not known to me), Install, the new checks, and a
+  "Releasing" checklist. FORMAT.md: re-checked against Section 7 (all
+  constraints present; the spec's size-leakage estimate added); both
+  hexdumps checked byte by byte against `tests/vectors/v1-small.pwv` and
+  `fuzz/corpus/fuzz_body/seed-sample`; status changed from "draft (M3)".
+  THREAT_MODEL.md: Sections 2 and 18 compared mechanically with the spec:
+  verbatim. SECURITY.md: unchanged until a release (supported versions).
+- **Section 13, line by line:** `scripts/test_ids.py --matrix <spec>` reads
+  the spec's Section 13 rows, expands the ID ranges (`T-FMT-1–4`,
+  `T-FUZZ-\*`, `T-COV-1 – T-COV-5`), and lists for each row the tests and
+  the CI job that checks each test by name; it fails on an unknown ID.
+  All 34 rows resolve; every named test is now checked by name somewhere
+  (`t_store_1_foreign_fs_real_mount` got a by-name loop in its vfat step;
+  T-COV-3 joined `test`'s `--require` list). Which rows are *verified*
+  is the coverage report's test-ID table on a nightly run; S7 (T-CLIP),
+  S2 (T-MIG-2), S10 (T-MEM-4) were verified on CI in M7/M8; R1 needs
+  T-STORE-8 and E4 needs T-MUT-1 and T-COV-1 .. T-COV-5 to pass.
+
+### Unverified until CI runs (named so a failure is quick to place)
+
+`actions/download-artifact@v6` and `actions/cache@v4` (tags assumed, not
+checked from here), LazyFS's layout, mount script and fault command,
+`cargo-llvm-cov` 0.9.1 on toolchain 1.99.1 (its README lists Rust
+1.99–1.100 with LLVM 23 as supported), the instrumented suite under
+`xvfb-run` and the real `gpg`, `cargo fuzz coverage` on this tree, and
+every new job's runtime (all caps provisional).
+
+### Local gate result (2026-11-17, round 2)
+
+`cargo test --locked --no-fail-fast`: default 551 s, `memtest` 582 s,
+release 132 s, `testkdf` 517 s, `memtest,testkdf` 576 s, all green
+(T-STORE-3 passed in each); `--no-default-features` (`cli`, `e2e`, `clip`,
+`mig`) 42 s, green. `test_ids.py --require` over the five logs: 24 IDs
+(the 23 of round 1 plus T-COV-3), 0 problems; `--check --spec`: 81 IDs,
+0 to do, every named test checked by name. fmt (crate, `fuzz/`), clippy
+`-D warnings` in six configurations and on the fuzz crate, the six
+`cfg(miri)` compile checks, `loc_budget.py` (4,478 / 4,800; `src/`
+unchanged), `sh -n` on every script, both workflows parse (PyYAML).
+T-PERF-1 locally in release: as above. **Instrumented suite** (local
+stand-in for the coverage jobs, since `llvm-tools` is missing): a
+`RUSTC_WRAPPER` adding `-C instrument-coverage` to the pwv crates; the full
+default suite passed (495 s); `e2e`, `cli`, `mig`, `clip` passed with the
+instrumented `pwv` binary and its children wrote 156 profiles; `mem`,
+`harden`, `secmem`, `kdf_region` (memtest) passed too. So instrumentation
+changes no test outcome here, and children write profiles.
+
+### Coverage exceptions
+
+Uncovered production lines and functions of `format`, `crypto`, `gen`,
+`store`, `vault` that are justified (spec 14.13). Read by
+`scripts/coverage_report.py`: one row per line or range,
+`| src/<file>:<line>[-<line>] | line or function | date | reason |`.
+Empty until the first coverage report.
+
+| Location | Kind | Date | Reason |
+| --- | --- | --- | --- |
+
+### Surviving mutants
+
+Mutants that survive the full suite (T-MUT-1), each with its exact
+cargo-mutants name in backticks, the date, and the reason. Read by
+`scripts/mutants_check.py`. Empty until the first weekly run.
+
+| Mutant | Date | Reason |
+| --- | --- | --- |

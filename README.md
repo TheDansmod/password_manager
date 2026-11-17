@@ -1,5 +1,9 @@
 # pwv
 
+[![ci](https://github.com/TheDansmod/password_manager/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TheDansmod/password_manager/actions/workflows/ci.yml)
+![line coverage](https://raw.githubusercontent.com/TheDansmod/password_manager/badges/coverage.svg)
+![Section 14 test IDs passing](https://raw.githubusercontent.com/TheDansmod/password_manager/badges/test-ids.svg)
+
 A single-binary, Linux-first terminal password manager written in Rust,
 specified in `rust_password_manager_specification.md` (one level up).
 
@@ -7,6 +11,29 @@ specified in `rust_password_manager_specification.md` (one level up).
 seventeen commands exist, in an interactive session (`pwv`) and as one-shot
 invocations (`pwv <command> ...`); the memory canary scan and the legacy
 migration (M8) are done. There is no release yet.
+
+The badges: CI status of `main`; overall line coverage of production code
+(spec Section 14.13, merged over every coverage run); and how many of the
+81 Section 14 test IDs passed in the latest run on `main` (a push run skips
+the nightly and weekly gates, which count as not run there). The coverage
+and test-ID badges are SVG files that CI renders itself and pushes to the
+`badges` branch; no third-party service is involved.
+
+## Install
+
+Linux on x86_64 or aarch64. Either download a release file and verify it
+first (see `SECURITY.md`, "Verifying a release"), or build from source with
+the pinned toolchain (`rust-toolchain.toml`):
+
+```sh
+cargo build --locked --release
+install -m 0755 target/release/pwv ~/.local/bin/pwv
+pwv doctor        # swap, core dumps, memory locking, vault location
+```
+
+The vault lives in `$XDG_DATA_HOME/pwv/vault.pwv` (default
+`~/.local/share/pwv/vault.pwv`), backups next to it, and the rollback
+state in `$XDG_STATE_HOME/pwv/`. `--vault <path>` chooses another file.
 
 ## Quick start
 
@@ -89,7 +116,39 @@ cargo +nightly fuzz run fuzz_tokenizer -- -max_total_time=60   # T-FUZZ-4
 cargo +nightly fuzz run fuzz_sanitize -- -max_total_time=60    # T-FUZZ-5
 sh scripts/release_build.sh dist          # T-REPRO-1, T-ENG-7, link hardening; release files
 python3 -I scripts/test_ids.py --markdown # every Section 14 test ID and what proves it
+PWV_PERF=1 cargo test --locked --release --test perf -- --test-threads=1   # T-PERF-1
+cargo test --locked --test eng t_cov_3    # T-COV-3's list of unsafe blocks
+python3 -I scripts/coverage_report.py --self-test   # the coverage report's own checks
+sh scripts/mutants.sh crypto 0/1 /tmp/mut           # T-MUT-1 for one module (slow)
 ```
+
+CI only (they need tools the development sandbox lacks):
+
+- **Coverage** (spec 14.13): `scripts/coverage_run.sh` runs the whole
+  suite instrumented with `cargo-llvm-cov`, once per configuration;
+  `scripts/coverage_report.py` merges the runs and checks T-COV-1 ..
+  T-COV-5: at least 95 % of lines in `format`, `crypto`, `gen`, `store`,
+  `vault` and 85 % overall, every function of those five covered, every
+  `unsafe` block fully covered, and no module more than 0.5 points below
+  `coverage/baseline.json`. Uncovered lines must be covered or justified in
+  `DESIGN_NOTES.md` ("Coverage exceptions"). The job summary of
+  `coverage-report` shows the tables and every test ID's status.
+- **T-STORE-8**: `scripts/lazyfs.sh` builds and mounts LazyFS; then
+  `PWV_REQUIRE_LAZYFS=1 PWV_LAZYFS_DIR=... PWV_LAZYFS_FIFO=... cargo test
+  --release --test store -- --exact t_store_8_kill_loop_with_power_loss`.
+- **T-MUT-1**: the weekly workflow `mutants.yml` (also "Run workflow").
+
+## Releasing
+
+1. Every job of `ci.yml` is green on `main`, including a nightly run
+   ("Run workflow" runs the nightly set at once).
+2. **A green run of `mutants.yml` (T-MUT-1) on the commit to be tagged**:
+   start it with "Run workflow" if the weekly run is older than the last
+   change to `src/`. Surviving mutants must be justified in
+   `DESIGN_NOTES.md`.
+3. Update `SECURITY.md`'s supported versions, then push a `v*` tag:
+   `release.yml` builds twice (T-REPRO-1), checks T-ENG-7, and attests the
+   files. Attach them to a GitHub release by hand.
 
 Release files are built by CI from version tags and carry a GitHub artifact
 attestation; `SECURITY.md` explains how to verify a download.
