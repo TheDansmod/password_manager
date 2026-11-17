@@ -2,7 +2,8 @@
 # One instrumented coverage run (spec Section 14.13; M9), for the CI jobs
 # `coverage` (stable, line/region/function) and `coverage-branch` (nightly,
 # `--branch`). Writes into OUTDIR what scripts/coverage_report.py merges:
-# lcov.info, cov.json, html/, meta.json, unsafe_blocks.tsv, test.log.
+# lcov.info, cov.json, html/, meta.json, unsafe_blocks.tsv, test.log; and
+# for diagnosis profiles.txt, unreadable_profiles.txt, report.log.
 #
 # Usage: sh scripts/coverage_run.sh [--branch] OUTDIR NAME [cargo args...]
 #   e.g. sh scripts/coverage_run.sh cov/memtest memtest --features memtest
@@ -46,16 +47,37 @@ PWV_UNSAFE_BLOCKS="$out/unsafe_blocks.tsv" \
   cargo llvm-cov $branch --no-report --locked --no-fail-fast "$@" >"$out/test.log" 2>&1 || status=$?
 # The log holds test names and results only; show the outcome lines.
 grep -E "^test result:|FAILED|panicked at|^error" "$out/test.log" || true
-profiles=$(find "${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}" -name '*.profraw' | wc -l)
+profdir=${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}
+find "$profdir" -name '*.profraw' > "$out/profiles.txt"
+profiles=$(wc -l < "$out/profiles.txt")
 echo "profiles written: $profiles"
 
-cargo llvm-cov report "$@" --lcov --output-path "$out/lcov.info"
-cargo llvm-cov report "$@" --json --output-path "$out/cov.json"
-cargo llvm-cov report "$@" --html --output-dir "$out/html"
-# The per-file summary table (counts only) for the job log.
-cargo llvm-cov report "$@"
+# A process killed while it writes its profile (at exit) leaves a truncated
+# file, and one unreadable profile fails the whole merge. In M9 CI round 2
+# every run's first `report` failed after all tests had passed: one of 219
+# profiles had a corrupt header ("no profile can be merged"). Each profile
+# is checked with llvm-profdata, and unreadable ones are set aside and
+# listed with llvm-profdata's first error line (file names hold only a pid
+# and a binary signature). Dropping one has
+# the same effect as a SIGKILL before the write: it can only lower the
+# measured coverage, never raise it. The count is in meta.json, so in the
+# report's summary.
+host=$(rustc -vV | sed -n 's/^host: //p')
+profdata="$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-profdata"
+: > "$out/unreadable_profiles.txt"
+while IFS= read -r p; do
+  if ! "$profdata" show "$p" > /dev/null 2> "$out/profdata.err"; then
+    echo "$(basename "$p"): $(head -n 1 "$out/profdata.err")" >> "$out/unreadable_profiles.txt"
+    rm -f "$p"
+  fi
+done < "$out/profiles.txt"
+rm -f "$out/profdata.err"
+unreadable=$(wc -l < "$out/unreadable_profiles.txt")
+echo "unreadable profiles set aside: $unreadable"
+head -n 20 "$out/unreadable_profiles.txt"
 
-COV_BRANCH=$branch python3 -I - "$out/meta.json" "$name" "$*" <<'EOF'
+COV_BRANCH=$branch COV_PROFILES=$profiles COV_UNREADABLE=$unreadable \
+  python3 -I - "$out/meta.json" "$name" "$*" <<'EOF'
 import json, os, subprocess, sys
 path, name, args = sys.argv[1:4]
 def ver(*cmd):
@@ -68,9 +90,25 @@ meta = {
     "cargo-llvm-cov": ver("cargo", "llvm-cov", "--version"),
     "PROPTEST_RNG_SEED": os.environ.get("PROPTEST_RNG_SEED", ""),
     "PWV_T_STORE_3_SEED": os.environ.get("PWV_T_STORE_3_SEED", ""),
+    "profiles": os.environ.get("COV_PROFILES", "").strip(),
+    "unreadable profiles set aside": os.environ.get("COV_UNREADABLE", "").strip(),
 }
 with open(path, "w", encoding="utf-8") as f:
     json.dump(meta, f, indent=2, sort_keys=True)
 EOF
+
+# Errors of `report` also go to report.log, which the artefact keeps.
+report() {
+  if ! cargo llvm-cov report "$@" 2>> "$out/report.log"; then
+    echo "cargo llvm-cov report failed:"
+    cat "$out/report.log"
+    exit 1
+  fi
+}
+report "$@" --lcov --output-path "$out/lcov.info"
+report "$@" --json --output-path "$out/cov.json"
+report "$@" --html --output-dir "$out/html"
+# The per-file summary table (counts only) for the job log.
+report "$@"
 test -s "$out/unsafe_blocks.tsv" || { echo "tests/eng.rs did not write the unsafe block list"; exit 1; }
 exit "$status"

@@ -465,8 +465,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: format # measured 9m34 (M6 round 1)
-            timeout: 29
+          - name: format # measured 15m45 (M9 nightly 1; 9m34 in M6 round 1)
+            timeout: 48
             args: "--no-default-features --test format -- --skip t_fmt_2_entry_count"
           - name: format-10000-entries # measured 11m58 (M6 round 3)
             timeout: 36
@@ -494,8 +494,8 @@ jobs:
           # one case each (PROPTEST_CASES=1, fixed PROPTEST_RNG_SEED 1 and
           # 2; seed 1 is 153 operations, seed 2 is 25), so --report-time
           # gives a time per case (DESIGN_NOTES, M5 CI round 2).
-          - name: vault-model # measured 11m35 (M8 round 2)
-            timeout: 35
+          - name: vault-model # measured 11m42 (M9 nightly 1; 11m35 in M8 round 2)
+            timeout: 36
             args: >-
               --no-default-features --features testkdf --test vault --
               new_ set_replaces renames_to_self mv_reorders
@@ -511,10 +511,10 @@ jobs:
           # operation is checked in exactly one part, and all five are
           # needed: t_vault_1_ci_ranges_cover_every_segment_once reads the
           # `part:` values below (DESIGN_NOTES, M8 CI round 1 and M9).
-          # Estimated 1h41, 1h32, 1h04, 1h04, 1h47; provisional caps 350
-          # until measured.
+          # Measured in M9 nightly 1: 1h55m40, 2h10m07, 1h13m16, 47m36,
+          # 1h20m44. Caps 3x (part 2: 350, the ceiling under GitHub's 360).
           - name: vault-model-t-vault-1-case-1-part-1
-            timeout: 350
+            timeout: 347
             seed: "1"
             part: "0..10"
             args: >-
@@ -528,21 +528,21 @@ jobs:
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-3
-            timeout: 350
+            timeout: 220
             seed: "1"
             part: "12..13"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-4
-            timeout: 350
+            timeout: 143
             seed: "1"
             part: "13..14"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-5
-            timeout: 350
+            timeout: 243
             seed: "1"
             part: "14.."
             args: >-
@@ -599,8 +599,8 @@ jobs:
             args: >-
               --no-default-features --test gen --
               --exact word_draw_first_middle_and_last_index --nocapture
-          - name: gen-words-os-bytes # measured 15m59 (M6 round 3)
-            timeout: 48
+          - name: gen-words-os-bytes # measured 16m13 (M9 nightly 1; 15m59 in M6 round 3)
+            timeout: 49
             args: >-
               --no-default-features --test gen --
               --exact os_bytes_generates_both_modes
@@ -659,10 +659,10 @@ jobs:
     # to files and the last step fails if there is any.
     # RUSTFLAGS replaces .cargo/config.toml's link hardening: acceptable for
     # a test build (T-REPRO-1's script checks the release artefact).
-    # Provisional cap 120 until measured.
+    # Measured 13m00 to 17m49 (M9 nightly 1); cap 54 (3x).
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    timeout-minutes: 54
     strategy:
       fail-fast: false
       matrix:
@@ -709,10 +709,10 @@ jobs:
     # may use 16 or 64 KiB pages; DESIGN_NOTES, M9).
     # If the runner label does not exist, the job waits for a runner and
     # never starts: check the label against GitHub's runner list.
-    # Provisional cap 150 until measured.
+    # Measured 57m17 (M9 nightly 1); cap 172 (3x).
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-26.04-arm
-    timeout-minutes: 150
+    timeout-minutes: 172
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain (rust-toolchain.toml)
@@ -748,7 +748,7 @@ jobs:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
     # uniform 0-50 ms into the save loop), nightly and on "run now" (every
     # push until M9), against the runner's ext4 disk.
-    # Measured 3m24 (M6 round 1), 4m07 (M8 round 2).
+    # Measured 3m24 (M6 round 1), 4m07 (M8 round 2), 3m33 (M9 nightly 1).
     # M9: T-STORE-8, the same kill loop on a LazyFS mount with a simulated
     # power loss (`lazyfs::clear-cache`: unsynced data dropped) after every
     # kill, 5,000 iterations; built from source (scripts/lazyfs.sh).
@@ -902,9 +902,10 @@ jobs:
     # gpg (as `e2e` does); the others run without a display, so the "no
     # clipboard" paths are measured too. Fixed seeds (determinism). Release
     # builds, Miri, sanitizers, fuzzing, mutants and `durability` are not
-    # included (spec). Provisional cap 90 until measured.
+    # included (spec). The test runs measured 10m46 to 21m33 (M9 round 2,
+    # where the report failed); cap 65 (3x the slowest) until a full run.
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
+    timeout-minutes: 65
     strategy:
       fail-fast: false
       matrix:
@@ -1040,7 +1041,7 @@ jobs:
           rustup toolchain install nightly --profile minimal --component llvm-tools
           cargo +nightly install --locked cargo-fuzz --version "$CARGO_FUZZ_VERSION"
       - name: Restore the previous night's corpus and T-COV-6 figures
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: long
           key: fuzz-long-${{ matrix.target }}-${{ github.run_id }}
@@ -1067,7 +1068,7 @@ jobs:
           cp tcov6.json long/tcov6.json
       - name: Save the corpus and figures for the next night
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: long
           key: fuzz-long-${{ matrix.target }}-${{ github.run_id }}
@@ -1126,19 +1127,19 @@ jobs:
         with:
           persist-credentials: false
       - name: Download the coverage runs
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: coverage-*
           path: runs/coverage
       - name: Download the branch coverage runs (nightly only)
         continue-on-error: true
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: branchcov-*
           path: runs/branch
       - name: Download the test logs
         continue-on-error: true
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: "*-logs"
           path: logs

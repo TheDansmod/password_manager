@@ -24,8 +24,8 @@ GitHub artifact attestation (Sigstore). Verify a download with the GitHub CLI
 before you run it:
 
     gh attestation verify pwv-<version>-x86_64-linux \
-      --repo <owner>/pwv \
-      --signer-workflow <owner>/pwv/.github/workflows/release-build.yml
+      --repo TheDansmod/password_manager \
+      --signer-workflow TheDansmod/password_manager/.github/workflows/release-build.yml
     sha256sum -c SHA256SUMS
 
 The first command proves that the file was built by that workflow from this

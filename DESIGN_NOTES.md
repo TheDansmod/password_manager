@@ -2835,7 +2835,7 @@ implementation (`test_ids.py --check`: 0 to do).
 ### Unverified until CI runs (named so a failure is quick to place)
 
 `actions/download-artifact@v6` and `actions/cache@v4` (tags assumed, not
-checked from here), LazyFS's layout, mount script and fault command,
+checked from here; both moved to Node 24 majors in the next entry), LazyFS's layout, mount script and fault command,
 `cargo-llvm-cov` 0.9.1 on toolchain 1.99.1 (its README lists Rust
 1.99–1.100 with LLVM 23 as supported), the instrumented suite under
 `xvfb-run` and the real `gpg`, `cargo fuzz coverage` on this tree, and
@@ -2879,3 +2879,92 @@ cargo-mutants name in backticks, the date, and the reason. Read by
 
 | Mutant | Date | Reason |
 | --- | --- | --- |
+
+## 2026-11-17 — M9 CI round 2 results; round 3 contents
+
+**Nightly run of M9 Part A on `main` (owner's report and screenshots):
+every job green**, including all 21 Miri jobs, the four `sanitizers-asan`
+configurations (T-SAN-1 passed on CI), `test-arm64` (57m17) and
+`durability` (3m33). The five T-VAULT-1 case-1 parts took 1h55m40,
+2h10m07, 1h13m16, 47m36 and 1h20m44 (estimates were 1h41, 1h32, 1h04,
+1h04, 1h47): part 2 is the slowest and has 1.5x headroom under GitHub's
+360 min limit, so the split holds. `test` 32m50 on `main`.
+
+**M9 round 2 push run (separate branch).** Every job green except the five
+`coverage` jobs and `coverage-report`. In all five coverage runs every test
+passed (`test.log` in the artefacts), and the artefact held only
+`test.log` and `unsafe_blocks.tsv`. So `scripts/coverage_run.sh` stopped
+at its first `cargo llvm-cov report` (the LCOV export), whose error went
+to the job log only. `coverage-report` then had no runs to merge (8 s). The
+unsafe block list matched `tests/eng.rs` (23 blocks) in all five.
+
+**Cause (confirmed from the owner's paste of the `coverage (default)` job
+log).** After the tests: `profiles written: 219`, then
+
+    warning: .../target/llvm-cov-target/password_manager-7042-<signature>_0.profraw:
+      invalid instrumentation profile data (file header is corrupt)
+    error: no profile can be merged
+    error: failed to merge profile data: ... llvm-profdata merge -sparse ...
+
+One profile of 219 was corrupt (only one warning), and `llvm-profdata
+merge` by default fails the whole merge when any input is invalid. The most
+likely writer is a `pwv` child killed while it wrote its profile at exit:
+the suite kills children on purpose (PTY tests' teardown,
+SIGTERM/SIGHUP/SIGQUIT in T-E2E, T-MEM signals, SIGSEGV in `harden`).
+Which test spawned pid 7042 is not recorded, and since the kills are timed
+by the tests, other runs may differ.
+
+**Changes (round 3).**
+- `scripts/coverage_run.sh`:
+  - lists every profile (`profiles.txt`) and checks each with
+    `llvm-profdata show`, from the toolchain's `llvm-tools`;
+  - sets unreadable ones aside, listing each name with llvm-profdata's
+    first error line in `unreadable_profiles.txt`, and records both counts
+    in `meta.json`, which the report's "Toolchains and seeds" prints;
+  - sends every `report` error to `report.log` (kept in the artefact) and
+    prints it, so a remaining failure is visible in the artefact and the
+    log.
+
+  Dropping a truncated profile has the same effect as a SIGKILL before the
+  write (spec 14.13 already accepts that). It can only lower measured
+  coverage. Dry-run here with stub `cargo`, `rustc` and `llvm-profdata`
+  (one corrupt profile set aside and counted; a failing `report` exits 1
+  with its error in `report.log`). The real tools are not available in the
+  sandbox.
+- **Node 20 warning** ("actions/download-artifact@v6 ... forced to run on
+  Node.js 24"). This is the same class of warning as in M4 CI round 2,
+  fixed then by moving `checkout` to `@v5` and `upload-artifact` to `@v6`.
+  - `actions/download-artifact@v6` → `@v7`, the Node 24 major released
+    alongside `upload-artifact@v6`.
+  - `actions/cache/restore` and `actions/cache/save` `@v4` → `@v5`, Node 24.
+    They are used only by the nightly `fuzz-long`, so this warning had not
+    shown yet.
+
+  Tags are assumed from memory: a missing tag fails at "Set up job".
+  `actions/attest-build-provenance@v3` (tags only) is unchanged; check its
+  runtime when a tag is built.
+- **Caps** (3x the slowest measurement, floor 10, ceiling 350):
+
+  | Job | Measured | Cap |
+  | --- | --- | --- |
+  | `sanitizers` `format` | 15m45 (9m34 before) | 29 → 48 |
+  | `sanitizers` `vault-model` | 11m42 | 35 → 36 |
+  | `sanitizers` `gen-words-os-bytes` | 16m13 | 48 → 49 |
+  | T-VAULT-1 case-1 parts 1–5 | see above | 350 → 347, 350, 220, 143, 243 |
+  | `sanitizers-asan` | 13m00 to 17m49 | 120 → 54 |
+  | `test-arm64` | 57m17 | 150 → 172 |
+  | `coverage` | 10m46 to 21m33 (tests only) | 90 → 65 |
+
+  Unchanged, still within 3x: `test` (181), `e2e`, `lint`, `supply`,
+  `release-check`, `compat`, `coredump`, `fuzz-smoke`, the other Miri jobs.
+  `durability` stays 60 (it now runs T-STORE-8 too, not yet measured).
+  `coverage-report` stays at 15 because its 8 s run had nothing to merge.
+  `perf`, `fuzz-long` and `coverage-branch` have not run yet.
+- README badges: the owner replaced `<owner>` and renamed the repository to
+  `password_manager` (owner's change; the local directory keeps `pwv`).
+  Following that, the attestation command in `SECURITY.md` and in
+  `release-build.yml`'s header now names `TheDansmod/password_manager`
+  instead of `<owner>/pwv` (the old name would make the users' verify
+  command fail).
+
+`src/` and `tests/` unchanged (LOC 4,478 / 4,800).
