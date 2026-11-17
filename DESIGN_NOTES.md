@@ -3148,3 +3148,80 @@ are covered by T-COV-4's no-regression rule only.
 **Local checks (2026-11-17).** `cargo test --test secmem` (default and
 `memtest`); the instrumented T-MEM-2 check above; fmt; clippy
 `-D warnings` (default, `memtest`, `--no-default-features`, all targets).
+
+## 2026-11-17 — M9 first full run on `main`: two failures, causes and fixes
+
+**Run (owner's report).** The M9 branch, merged to `main`, then a manual
+full run ("Run workflow"). Every job green except `sanitizers-asan
+(default)` and `durability`. `coverage-report` passed every gate
+(`coverage_report_summary.md`: branches from all five `coverage-branch`
+runs included). Selected times, all within their caps: `test` 59m08,
+`test-arm64` 56m29, `sanitizers-asan` 10m00 to 19m24, T-VAULT-1 parts
+1h57m26 / 1h39m22 / 56m17 / 46m09 / 1h46m28, `perf` 59 s, `fuzz-long`
+about 31m30 each, `coverage-branch` 16m51 to 20m56. Caps unchanged this
+round.
+
+**`sanitizers-asan (default)`: a false report, not a leak.** The step
+"No AddressSanitizer report from any process" found one report file, for
+pid 6841, holding exactly:
+
+    WARNING: ptrace appears to be blocked (is seccomp enabled?). LeakSanitizer may hang.
+    Child exited with signal 42.
+
+- Source: LSan's `TestPTrace()` (compiler-rt
+  `sanitizer_stoptheworld_linux_libcdep.cpp`), run once per process before
+  its first leak check (at exit). It forks a child that calls
+  `ptrace(PTRACE_ATTACH, 0)` and `_exit(0)`, then `waitpid`s it and warns
+  if `WIFSIGNALED(status)`.
+- **Signal 42 was never sent.** Disassembly of the runtime
+  (`librustc-nightly_rt.asan.a`, nightly-2026-11-15) shows that `status` is
+  pre-filled with `0xaaaaaaaa` (pattern initialisation) and `waitpid`'s
+  return value is ignored; `0xaaaaaaaa & 0x7f = 0x2a = 42`. So the
+  report means "waitpid failed", not "ptrace blocked".
+- Why `waitpid` failed: `pwv` installs its SIGINT/SIGTERM/SIGHUP/SIGQUIT
+  handlers without `SA_RESTART` (on purpose, M7), so a signal arriving
+  during that `waitpid` makes it return `EINTR`. The PTY harness sends
+  exactly that: `ptyprocess` 0.5.0's `Drop` sends SIGHUP (then SIGCONT,
+  SIGINT, SIGTERM) to a child still alive when a test drops its session,
+  and under ASan a `pwv` that has printed its last line is still alive for
+  its exit-time leak check. A timing race, hence one process of hundreds,
+  one configuration of four.
+- **Reproduced locally** (stand-alone ASan program, 200 runs, SIGHUP
+  handler without `SA_RESTART`, SIGHUP sent continuously during exit): the
+  same two lines, "signal 42", in 160 runs; with `SA_RESTART`, none.
+  Every child still exited 0, and its leak check went on (the warning
+  only says LSan "may hang"; the tracer itself is unaffected).
+- **Fix (`ci.yml`, that step only):** a report file whose content, with
+  the `==pid==` prefixes removed, is exactly those two lines is accepted
+  as a named false report (counted and named in the log). Anything else
+  still fails: any additional line (a leak, an error), a different signal
+  number (a real seccomp kill would be SIGSYS, 31), an empty file. Checked
+  locally with the reproduced reports and those three altered cases.
+  `detect_leaks` stays on. This is the only exception, dated here as the
+  owner's rule for suppressions requires.
+- Not changed: `pwv`'s handlers (no `SA_RESTART` is a design decision)
+  and the harness (the kernel also sends SIGHUP when a PTY master closes,
+  so the race cannot be removed from the tests). Upstream: `TestPTrace`
+  should check `waitpid`'s result; if a future runtime fixes that or
+  changes the fill pattern, the exception simply stops matching.
+
+**`durability`: LazyFS build failed under CMake 4.** T-STORE-3 (5,000
+iterations) passed; then LazyFS's configure stopped at
+`build/_deps/toml-src/CMakeLists.txt:1: Compatibility with CMake < 3.5 has
+been removed from CMake`. ubuntu-26.04 ships CMake 4, and the TOML library
+LazyFS fetches at configure time declares an older minimum. T-STORE-8 did
+not run.
+- `scripts/lazyfs.sh` exports `CMAKE_POLICY_VERSION_MINIMUM=3.5` (CMake's own
+  suggested remedy) before both `build.sh` scripts; CMake reads it from
+  the environment, so FetchContent sub-builds see it too and LazyFS is
+  not patched. Checked locally with CMake 4.4.5 (PyPI) on a project
+  declaring `cmake_minimum_required(VERSION 2.8)`: error without, configures
+  with it.
+- `LAZYFS_REF` pinned to `3edad01aa936b81fed9bd64e47e725fc5ef6c977`, the
+  commit this run printed (earlier than "after the first green run", so the
+  next run builds the same tree).
+- T-STORE-8 itself is still unmeasured on CI: its first real run is the
+  next nightly; `durability`'s cap stays 60 until then.
+
+`src/` and `tests/` unchanged. Local checks: `sh -n scripts/lazyfs.sh`,
+`ci.yml` parses (PyYAML 6.0.2), `test_ids.py --check` (81 IDs).

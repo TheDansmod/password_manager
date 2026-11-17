@@ -43,6 +43,9 @@
 # (30 min per target, corpus kept, T-COV-6), `perf` (T-PERF-1, nightly),
 # and T-STORE-8 (LazyFS) in `durability`. T-MUT-1 is the weekly
 # workflow mutants.yml.
+# M9 (first full run on `main`, 2026-11-17): `sanitizers-asan` accepts one
+# named false report (LSan's ptrace self-test after an interrupted waitpid);
+# `durability` builds LazyFS under CMake 4 and pins its commit.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
@@ -85,9 +88,10 @@ env:
   CARGO_FUZZ_VERSION: "0.13.2"
   # M9, spec 14.13 (coverage jobs).
   CARGO_LLVM_COV_VERSION: "0.9.1"
-  # M9, T-STORE-8. Empty: LazyFS's default branch; the job prints the commit
-  # it used, to be pinned here once a run has passed.
-  LAZYFS_REF: ""
+  # M9, T-STORE-8. The LazyFS commit the first full run on `main` printed
+  # (2026-11-17; its build then failed under CMake 4, fixed in
+  # scripts/lazyfs.sh). Empty would mean LazyFS's default branch.
+  LAZYFS_REF: "3edad01aa936b81fed9bd64e47e725fc5ef6c977"
   # `compat`: reference implementations for the independent golden check.
   PY_ARGON2_CFFI_VERSION: "23.1.0"
   PY_PYNACL_VERSION: "1.5.0"
@@ -692,14 +696,37 @@ jobs:
             --target x86_64-unknown-linux-gnu --lib --bins $targets ${{ matrix.features }}
       - name: No AddressSanitizer report from any process
         if: always()
+        # Reports hold stack traces, addresses, and shadow bytes, never
+        # memory contents. Every report fails the step except one named
+        # false report, accepted only when the file holds exactly these
+        # two lines (DESIGN_NOTES, "M9 first full run on main", 2026-11-17):
+        #   WARNING: ptrace appears to be blocked (is seccomp enabled?). ...
+        #   Child exited with signal 42.
+        # LSan's ptrace self-test (TestPTrace, at a process's first leak
+        # check) ignores waitpid's result. When a signal interrupts that
+        # waitpid (pwv's handlers have no SA_RESTART, and the PTY harness
+        # sends SIGHUP to a child still exiting), it reads its unwritten
+        # status, filled with 0xaaaaaaaa: 0xaa & 0x7f = 42. Nothing was
+        # killed and the leak check still runs; a leak would add lines,
+        # and a real seccomp kill reports a different signal, so both fail.
         run: |
-          if ls "$RUNNER_TEMP"/asan/report* >/dev/null 2>&1; then
-            # Reports hold stack traces, addresses, and shadow bytes, never
-            # memory contents.
-            cat "$RUNNER_TEMP"/asan/report*
-            exit 1
-          fi
-          echo "no reports"
+          benign='WARNING: ptrace appears to be blocked (is seccomp enabled?). LeakSanitizer may hang.
+          Child exited with signal 42.'
+          benign=$(printf '%s\n' "$benign" | sed 's/^ *//')
+          fail=0
+          accepted=0
+          for f in "$RUNNER_TEMP"/asan/report*; do
+            [ -e "$f" ] || continue
+            if [ "$(sed 's/^==[0-9]*==//' "$f")" = "$benign" ]; then
+              accepted=$((accepted + 1))
+              echo "accepted (named false report, LSan TestPTrace EINTR): $(basename "$f")"
+            else
+              cat "$f"
+              fail=1
+            fi
+          done
+          echo "reports failing: $fail (0/1); named false reports accepted: $accepted"
+          exit "$fail"
 
   test-arm64:
     # Spec 15.3: "an aarch64 runner nightly" (owner, 2026-11-16: the
