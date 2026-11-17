@@ -3,10 +3,10 @@
 A single-binary, Linux-first terminal password manager written in Rust,
 specified in `rust_password_manager_specification.md` (one level up).
 
-**Status: M7 (terminal, CLI, clipboard).** All seventeen commands exist,
-in an interactive session (`pwv`) and as one-shot invocations
-(`pwv <command> ...`). Still to come: the memory canary scan and the
-legacy migration script (M8), and release hardening (M9).
+**Status: M9 (hardening and release readiness) in progress.** All
+seventeen commands exist, in an interactive session (`pwv`) and as one-shot
+invocations (`pwv <command> ...`); the memory canary scan and the legacy
+migration (M8) are done. There is no release yet.
 
 ## Quick start
 
@@ -87,7 +87,12 @@ cargo +nightly fuzz run fuzz_body -- -max_total_time=60   # T-FUZZ-2 (see fuzz/R
 cargo +nightly fuzz run --features testkdf fuzz_open -- -max_total_time=60   # T-FUZZ-3
 cargo +nightly fuzz run fuzz_tokenizer -- -max_total_time=60   # T-FUZZ-4
 cargo +nightly fuzz run fuzz_sanitize -- -max_total_time=60    # T-FUZZ-5
+sh scripts/release_build.sh dist          # T-REPRO-1, T-ENG-7, link hardening; release files
+python3 -I scripts/test_ids.py --markdown # every Section 14 test ID and what proves it
 ```
+
+Release files are built by CI from version tags and carry a GitHub artifact
+attestation; `SECURITY.md` explains how to verify a download.
 
 ## Word list
 
@@ -100,6 +105,11 @@ The list is MIT-licensed: Copyright (c) 2012 Rochester Institute of
 Technology. The full licence text is in `src/wordlist.LICENSE`; it must
 accompany any copy of the list, including release artefacts (the binary
 embeds the list).
+
+## Licence
+
+pwv is released under the MIT licence; see `LICENSE`. The embedded word list
+has its own MIT licence (above). Release files include both.
 
 ## Migrating from `encrypted_pw_mgr.py`
 

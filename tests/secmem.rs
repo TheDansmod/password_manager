@@ -15,7 +15,11 @@ assert_not_impl_any!(SecureArena: std::ops::Deref<Target = [u8]>, std::ops::Dere
 assert_not_impl_any!(SecretSlot<'static>: std::ops::Deref<Target = [u8]>, std::ops::DerefMut);
 assert_not_impl_any!(pwv::secmem::Slots<'static>: Clone, Send, Sync);
 
-const PAGE: usize = 4096;
+/// The kernel's page size (4 KiB on x86_64; an arm64 kernel may use 16 or
+/// 64 KiB). The arena rounds to it (`sys::Region::new`).
+fn page() -> usize {
+    rustix::param::page_size()
+}
 
 fn arena() -> SecureArena {
     SecureArena::new(DEFAULT_ARENA, false).expect("arena (needs RLIMIT_MEMLOCK >= 1 MiB)")
@@ -27,7 +31,7 @@ fn t_mem_1_smaps_locked_dontdump_wipeonfork_guards() {
     assert!(a.is_locked());
     let (start, end) = a.data_range();
     assert_eq!(end - start, DEFAULT_ARENA);
-    assert_eq!(start % PAGE, 0);
+    assert_eq!(start % page(), 0);
     let smaps = std::fs::read_to_string("/proc/self/smaps").expect("smaps");
     let vmas = common::parse_smaps(&smaps);
     let data = common::vma_at(&vmas, start).expect("data vma");
@@ -66,7 +70,11 @@ fn arena_size_bounds_and_rounding() {
         Some(Error::Size)
     );
     let a = SecureArena::new(MIN_ARENA + 1, false).expect("arena");
-    assert_eq!(a.size(), MIN_ARENA + PAGE, "rounded up to whole pages");
+    assert_eq!(
+        a.size(),
+        (MIN_ARENA + 1).next_multiple_of(page()),
+        "rounded up to whole pages"
+    );
 }
 
 #[test]

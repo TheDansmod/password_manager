@@ -730,16 +730,52 @@ fn t_vault_1_part(segments: usize, j: usize, n: usize) -> std::ops::Range<usize>
     if j + 1 == n { lo..segments } else { lo..hi }
 }
 
-/// `PWV_T_VAULT_1_PART=j/n` (1-based `j`): run only part `j` of every case
-/// (CI splits the long Miri case across jobs; DESIGN_NOTES, M8).
-fn t_vault_1_part_env() -> Option<(usize, usize)> {
+/// One part of a split T-VAULT-1 case.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Part {
+    /// `j/n` (1-based `j`, stored 0-based): part `j` of `n` by the weight
+    /// model of `t_vault_1_part` (M8).
+    Of(usize, usize),
+    /// `a..b`, or `a..` up to the last segment: an explicit segment range
+    /// (M9: CI's ranges come from measured Miri times, which the weight
+    /// model did not fit; DESIGN_NOTES, M8 CI round 2).
+    Segments(usize, Option<usize>),
+}
+
+fn parse_part(v: &str) -> Part {
+    if let Some((a, b)) = v.split_once("..") {
+        let a = a.parse().expect("PWV_T_VAULT_1_PART a..b: a");
+        let b = (!b.is_empty()).then(|| b.parse().expect("PWV_T_VAULT_1_PART a..b: b"));
+        assert!(b.is_none_or(|b| b > a), "PWV_T_VAULT_1_PART a..b: a < b");
+        return Part::Segments(a, b);
+    }
+    let (j, n) = v
+        .split_once('/')
+        .expect("PWV_T_VAULT_1_PART is j/n or a..b");
+    let (j, n): (usize, usize) = (j.parse().expect("j"), n.parse().expect("n"));
+    assert!((1..=n).contains(&j), "PWV_T_VAULT_1_PART: 1 <= j <= n");
+    Part::Of(j - 1, n)
+}
+
+/// The segments a case of `segments` segments runs for `part`.
+fn t_vault_1_segments(segments: usize, part: Option<Part>) -> std::ops::Range<usize> {
+    match part {
+        None => 0..segments,
+        Some(Part::Of(j, n)) => t_vault_1_part(segments, j, n),
+        Some(Part::Segments(a, b)) => {
+            let a = a.min(segments);
+            a..b.map_or(segments, |b| b.clamp(a, segments))
+        }
+    }
+}
+
+/// `PWV_T_VAULT_1_PART` (`j/n` or `a..b`): run only that part of every case
+/// (CI splits the long Miri case across jobs; DESIGN_NOTES, M8 and M9).
+fn t_vault_1_part_env() -> Option<Part> {
     let v = std::env::var("PWV_T_VAULT_1_PART")
         .ok()
         .filter(|v| !v.is_empty())?;
-    let (j, n) = v.split_once('/').expect("PWV_T_VAULT_1_PART is j/n");
-    let (j, n): (usize, usize) = (j.parse().expect("j"), n.parse().expect("n"));
-    assert!((1..=n).contains(&j), "PWV_T_VAULT_1_PART: 1 <= j <= n");
-    Some((j - 1, n))
+    Some(parse_part(&v))
 }
 
 /// One T-VAULT-1 case: an empty vault is created and saved, then the
@@ -761,14 +797,14 @@ fn t_vault_1_case(
     fill: usize,
     ops: &[Op],
     seen: &RefCell<BTreeMap<String, usize>>,
-    part: Option<(usize, usize)>,
+    part: Option<Part>,
 ) -> Result<(), TestCaseError> {
     let fill = if size == MIN_ARENA { fill } else { 0 };
     let mut arena = SecureArena::new(size, true).expect("arena");
     let mut disk = Disk::new();
     let mut h = keys.h0.clone();
     let segments = ops.chunks(10).count();
-    let run = part.map_or(0..segments, |(j, n)| t_vault_1_part(segments, j, n));
+    let run = t_vault_1_segments(segments, part);
     let mut r = filler(fill);
     let mut at = run.start * 10;
     {
@@ -855,9 +891,57 @@ fn t_vault_1_parts_cover_every_segment_once() {
             assert_eq!(next, segments, "{segments} segments, {n} parts");
         }
     }
-    // The CI split of seed 1 (153 operations, 16 segments) into 4 parts.
+    // The CI split of seed 1 (153 operations, 16 segments) into 4 parts
+    // (M8; since M9, CI uses explicit ranges: the test below).
     let parts: Vec<_> = (0..4).map(|j| t_vault_1_part(16, j, 4)).collect();
     assert_eq!(parts, [0..8, 8..11, 11..14, 14..16]);
+}
+
+/// The explicit segment ranges in the workflow's Miri matrix (`part:`
+/// values) are contiguous from segment 0 and the last is open-ended, so
+/// together they run every segment of the case exactly once, whatever its
+/// length. Also pins the M9 split of seed 1 (16 segments) into 5 parts.
+#[test]
+fn t_vault_1_ci_ranges_cover_every_segment_once() {
+    let ci = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/.github/workflows/ci.yml"
+    ))
+    .expect("read ci.yml");
+    let parts: Vec<Part> = ci
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("part: "))
+        .map(|v| parse_part(v.trim_matches('"')))
+        .collect();
+    assert!(parts.len() >= 2, "the Miri matrix splits T-VAULT-1");
+    let mut next = Some(0);
+    for p in &parts {
+        let Part::Segments(a, b) = *p else {
+            panic!("CI uses explicit segment ranges: {p:?}");
+        };
+        assert_eq!(Some(a), next, "ranges are contiguous and in order");
+        next = b;
+    }
+    assert_eq!(next, None, "the last range is open-ended");
+    for segments in 0..=40 {
+        let mut at = 0;
+        for &p in &parts {
+            let r = t_vault_1_segments(segments, Some(p));
+            assert_eq!(r.start, at, "{segments} segments");
+            at = r.end;
+        }
+        assert_eq!(at, segments, "{segments} segments");
+    }
+    let seed_1: Vec<_> = parts
+        .iter()
+        .map(|&p| t_vault_1_segments(16, Some(p)))
+        .collect();
+    assert_eq!(seed_1, [0..10, 10..12, 12..13, 13..14, 14..16]);
+    // The parser: both forms, and a bad range is refused.
+    assert_eq!(parse_part("2/4"), Part::Of(1, 4));
+    assert_eq!(parse_part("3..7"), Part::Segments(3, Some(7)));
+    assert_eq!(parse_part("14.."), Part::Segments(14, None));
+    assert!(std::panic::catch_unwind(|| parse_part("5..5")).is_err());
 }
 
 #[test]

@@ -1,0 +1,51 @@
+# Reusable release build (spec 15.3 `release`), called only by release.yml.
+# M9 (owner, 2026-11-16): signing is GitHub artifact attestations (Sigstore,
+# keyless), aiming at SLSA v1.0 Build Level 3. The build and the signing both
+# run here, in a reusable workflow, so the attestation's signer identity is
+# this file and not the calling workflow; users verify with
+#   gh attestation verify <file> --repo <owner>/pwv \
+#     --signer-workflow <owner>/pwv/.github/workflows/release-build.yml
+# No key exists to look after. Only tag builds are attested; the per-push
+# `release-check` job in ci.yml runs the same script without signing.
+name: release-build
+
+on:
+  workflow_call:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # Provisional cap 30 until measured (three release builds).
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # Sigstore certificate for the attestation
+      attestations: write # store the attestation in the repository
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: T-REPRO-1, T-ENG-7, hardening; binary, licence, SHA256SUMS
+        run: sh scripts/release_build.sh dist
+      - name: Attest build provenance (signs the binary, both licences, and SHA256SUMS)
+        id: attest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/pwv-*
+            dist/SHA256SUMS
+      - name: Ship the Sigstore bundle with the files
+        run: cp "${{ steps.attest.outputs.bundle-path }}" dist/pwv.sigstore.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pwv-release-${{ github.ref_name }}
+          path: dist/
+          retention-days: 90

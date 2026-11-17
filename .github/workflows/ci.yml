@@ -28,26 +28,39 @@
 # (PWV_REQUIRE_GPG makes that mandatory), plus an "M8 gate by name" step.
 # In `test`, both files run in every configuration (mem.rs only does
 # something in memtest builds; mig.rs uses its stand-in gpg there).
-# Every gate of the milestones done so far runs on every push, so no local
-# nightly toolchain is needed. `sanitizers` (spec: nightly) runs on every push
-# as well as nightly. Later milestones add e2e, fuzz-long, ASan, coverage,
-# mutants, durability, and release jobs.
+# M9 (round 1): pushes run everything except the nightly jobs (Miri
+# `sanitizers`, `sanitizers-asan` = T-SAN-1, `durability`, `test-arm64`),
+# which run nightly and on "Run workflow" (owner, 2026-11-16). New:
+# `release-check` (T-REPRO-1, T-ENG-7, link hardening; every push), the
+# tag-triggered release.yml / release-build.yml (attested artefacts),
+# `sanitizers-asan` (T-SAN-1), `test-arm64` (spec 15.3's aarch64 runner),
+# an "M1-M3 gate by name" step checked against `test`'s kept logs, and the
+# Section 14 inventory check in `lint` (scripts/test_ids.py). Later M9
+# rounds add coverage, coverage-branch, coverage-report, mutants,
+# fuzz-long, T-STORE-8 (LazyFS) and T-PERF-1.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
 # fails fast; raise a cap only together with a measured runtime. Caps were
 # last reset from the M6 CI round 3 and M7 CI round 1 timings, taking the
-# slower of the two for each job (two raised after M7 CI round 2): the same Miri job differed by up to 1.9x
+# slower of the two for each job (two raised after M7 CI round 2, five
+# after M8 CI round 2): the same Miri job differed by up to 1.9x
 # between those rounds (DESIGN_NOTES, M7 CI round 1).
 # Exceptions near GitHub's 360 min job limit, where 3x does not fit, are
 # capped at 350 and say so in their comment.
 name: ci
 
+# M9 (owner, 2026-11-16): pushes and pull requests run every job except
+# the nightly ones; the nightly schedule and the manual "Run workflow"
+# button (workflow_dispatch) run every job. Nightly-only jobs carry
+# `if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}`.
+# The definition of done (spec 16) is two consecutive green nightly runs.
 on:
   push:
   pull_request:
   schedule:
-    - cron: "17 4 * * *" # daily, for `supply` (new advisories)
+    - cron: "17 4 * * *" # nightly: every job (and `supply`'s new advisories)
+  workflow_dispatch: # "run now": every job, as nightly
 
 permissions:
   contents: read
@@ -115,6 +128,8 @@ jobs:
         run: cargo install --locked tokei --version "$TOKEI_VERSION"
       - name: T-ENG-6 LOC budget
         run: python3 -I scripts/loc_budget.py src
+      - name: Section 14 test-ID inventory (every named test exists; M9)
+        run: python3 -I scripts/test_ids.py --check
 
   test:
     # M1 gate: T-MEM-1, T-MEM-2, T-MEM-3, T-MEM-5 (release), T-MEM-6, T-ENG-5.
@@ -129,27 +144,39 @@ jobs:
     # for T-MEM-5's ptrace / /proc/<pid>/mem refusal and for the RLIMIT_MEMLOCK
     # = 0 child of the --require-locked-kdf test.
     # Measured 48m00 (M6 round 1; M5 round 1 was 1h02m17; M6 round 3 was
-    # 25m38): T-VAULT-1 runs in all five configurations.
+    # 25m38; M8 round 2 was 49m39): T-VAULT-1 runs in all five
+    # configurations.
     # M7 round 1: the runner was lost ("lost communication with the
     # server") during the testkdf step, in tests/e2e.rs; the cause is not
     # established (DESIGN_NOTES, M7 CI round 1). Since then the five
     # configurations run under scripts/ci_guard.sh, which logs available
     # memory and load once a minute and kills a test process that exhausts
     # memory, so that a repeat leaves evidence in the log.
+    # M9: each configuration's output is kept in logs/ (an artefact, for
+    # the coverage report's test-ID table, spec 14.13 item 5), and the
+    # IDs that no other step names are checked by name in those logs.
     runs-on: ubuntu-26.04
-    timeout-minutes: 144
+    timeout-minutes: 149
     steps:
       - uses: actions/checkout@v5
+      - run: mkdir -p logs
       - name: Debug, default features (T-MEM-1, T-MEM-5 debug, T-MEM-6, T-ENG-5)
-        run: sh scripts/ci_guard.sh cargo test --locked
+        run: sh scripts/ci_guard.sh cargo test --locked 2>&1 | tee logs/default.txt
       - name: Debug, memtest (T-MEM-2, T-MEM-3)
-        run: sh scripts/ci_guard.sh cargo test --locked --features memtest
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest 2>&1 | tee logs/memtest.txt
       - name: Release (T-MEM-5 against the release binary)
-        run: sh scripts/ci_guard.sh cargo test --locked --release
+        run: sh scripts/ci_guard.sh cargo test --locked --release 2>&1 | tee logs/release.txt
       - name: Debug, testkdf (T-FMT-*; T-COMPAT-1 and T-CRY-1 on the golden vaults)
-        run: sh scripts/ci_guard.sh cargo test --locked --features testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features testkdf 2>&1 | tee logs/testkdf.txt
       - name: Debug, memtest + testkdf (T-MEM-7 zero-before-munmap on a locked region)
-        run: sh scripts/ci_guard.sh cargo test --locked --features memtest,testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest,testkdf 2>&1 | tee logs/memtest-testkdf.txt
+      - name: M1-M3 gate by name, from the logs above (M9; scripts/test_ids.py)
+        # Every named test of these IDs must have an `ok` line in the five
+        # configurations' logs and no `FAILED` line.
+        run: >-
+          python3 -I scripts/test_ids.py --require
+          T-KAT-1,T-KAT-2,T-COMPAT-1,T-FMT-1,T-FMT-2,T-FMT-3,T-FMT-4,T-CRY-1,T-CRY-2,T-CRY-3,T-CRY-4,T-CRY-5,T-CRY-6,T-MEM-1,T-MEM-2,T-MEM-3,T-MEM-5,T-MEM-6,T-MEM-7,T-FUZZ-3,T-ENG-2,T-ENG-3,T-ENG-4
+          --logs logs/*.txt
       - name: M4 gate by name (T-STORE-1 .. T-STORE-7, T-STORE-9; one line each in the log)
         # The steps above already run these in every configuration; this
         # step lists each gate test by name and fails if one did not run.
@@ -175,6 +202,7 @@ jobs:
           cargo test --locked --release --test vault 2>&1 | tee vault.txt
           for t in t_vault_1_model_matches_reference \
               t_vault_1_parts_cover_every_segment_once \
+              t_vault_1_ci_ranges_cover_every_segment_once \
               t_vault_2_collisions_leave_model_and_file_identical \
               t_vault_2_random_models \
               import_rejects_invalid_bodies_and_every_truncation \
@@ -211,6 +239,28 @@ jobs:
           PWV_FOREIGN_DIR=/mnt/pwv-vfat cargo test --locked --test store \
             -- --exact t_store_1_foreign_fs_real_mount 2>&1 | tee out.txt
           grep -q "test result: ok. 1 passed" out.txt
+      - name: Keep the test logs (no secrets by design, rule 9)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-logs
+          path: logs/
+          retention-days: 30
+
+  release-check:
+    # M9, every push: T-REPRO-1 (two clean --locked release builds from
+    # different paths, fixed SOURCE_DATE_EPOCH, --remap-path-prefix:
+    # bit-identical), link hardening still applied (PIE, RELRO, BIND_NOW),
+    # and T-ENG-7 (no PWV_MEMTEST / PWV_TESTKDF in the artefact; positive
+    # control on a memtest,testkdf build). scripts/release_build.sh is the
+    # same script the tag-triggered release workflow runs.
+    # Provisional cap 30 until measured (three release builds).
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: T-REPRO-1, T-ENG-7, hardening
+        run: sh scripts/release_build.sh "$RUNNER_TEMP/dist"
 
   e2e:
     # M7 gate (spec 15.3): T-E2E-1 .. T-E2E-12 through a PTY (tests/e2e.rs),
@@ -221,10 +271,10 @@ jobs:
     # clipboard tests cannot pass vacuously. T-MEM-* stay in `test` and
     # `coredump`. Measured 6m02 (M7 round 1).
     # The test commands run under scripts/ci_guard.sh (see `test`).
-    # Measured 6m19 (M7 round 2). M8 adds T-MEM-4 and T-MIG (about 2 min
-    # more locally): provisional cap 25 until measured.
+    # Measured 6m19 (M7 round 2). With M8's T-MEM-4 and T-MIG: 6m41
+    # (M8 round 2).
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    timeout-minutes: 21
     env:
       PWV_REQUIRE_X11: "1"
       PWV_REQUIRE_GPG: "1"
@@ -376,9 +426,11 @@ jobs:
   sanitizers:
     # T-SAN-2: Miri on `format` (M2) and on the M3 code (`crypto`, the
     # `vault` lifecycle, the `KdfRegion` cast in `secmem`). Every push and
-    # nightly. One job per suite, in parallel, each with its own cap (3x its
+    # nightly until M9; since M9 nightly and on "run now" only (owner,
+    # 2026-11-16; spec 15.3). One job per suite, in parallel, each with its own cap (3x its
     # slowest measured time); --report-time names any slow test. T-SAN-1 (ASan)
-    # is added in M9.
+    # is the separate job `sanitizers-asan` (M9).
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -391,8 +443,8 @@ jobs:
           - name: format-10000-entries # measured 11m58 (M6 round 3)
             timeout: 36
             args: "--no-default-features --test format -- --exact t_fmt_2_entry_count_0_max_max_plus_1"
-          - name: format-testkdf # measured 20m16 (M7 round 1)
-            timeout: 61
+          - name: format-testkdf # measured 26m13 (M8 round 2; 20m16 in M7 round 1)
+            timeout: 79
             args: "--no-default-features --features testkdf --test format --"
           # Native runs cover the heavy sweeps (T-CRY-1, -3, -5), the 6 MiB
           # capacity case, file I/O, and child processes (Miri isolation).
@@ -414,46 +466,57 @@ jobs:
           # one case each (PROPTEST_CASES=1, fixed PROPTEST_RNG_SEED 1 and
           # 2; seed 1 is 153 operations, seed 2 is 25), so --report-time
           # gives a time per case (DESIGN_NOTES, M5 CI round 2).
-          - name: vault-model # measured 11m11 (M6 round 1)
-            timeout: 34
+          - name: vault-model # measured 11m35 (M8 round 2)
+            timeout: 35
             args: >-
               --no-default-features --features testkdf --test vault --
               new_ set_replaces renames_to_self mv_reorders
               input_validation missing_entries import_merges import_suffix
               import_one_save seal_ error_messages
           # Seed 1 (153 operations, 16 segments of 10) ran 5h09m44 to
-          # 5h32m29 in one job, against GitHub's 360 min limit. Since M8 it
-          # runs in four parts (PWV_T_VAULT_1_PART=j/4; segments 0-7, 8-10,
-          # 11-13, 14-15): each part replays the earlier operations on the
-          # reference only and starts from the file the full run would
-          # reopen there. Every operation is checked in exactly one part;
-          # all four are needed (DESIGN_NOTES, M8 CI round 1). Caps are
-          # provisional (350) until measured.
+          # 5h32m29 in one job, against GitHub's 360 min limit. M8 ran it in
+          # four parts (46m30, 1h28m23, 3h03m16, 1h46m54 in M8 round 2).
+          # Since M9 the parts are explicit segment ranges chosen from those
+          # times (PWV_T_VAULT_1_PART=a..b; the last is open-ended): each
+          # part replays the earlier operations on the reference only and
+          # starts from the file the full run would reopen there. Every
+          # operation is checked in exactly one part, and all five are
+          # needed: t_vault_1_ci_ranges_cover_every_segment_once reads the
+          # `part:` values below (DESIGN_NOTES, M8 CI round 1 and M9).
+          # Estimated 1h41, 1h32, 1h04, 1h04, 1h47; provisional caps 350
+          # until measured.
           - name: vault-model-t-vault-1-case-1-part-1
             timeout: 350
             seed: "1"
-            part: "1/4"
+            part: "0..10"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-2
             timeout: 350
             seed: "1"
-            part: "2/4"
+            part: "10..12"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-3
             timeout: 350
             seed: "1"
-            part: "3/4"
+            part: "12..13"
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
           - name: vault-model-t-vault-1-case-1-part-4
             timeout: 350
             seed: "1"
-            part: "4/4"
+            part: "13..14"
+            args: >-
+              --no-default-features --features testkdf --test vault --
+              --exact t_vault_1_model_matches_reference
+          - name: vault-model-t-vault-1-case-1-part-5
+            timeout: 350
+            seed: "1"
+            part: "14.."
             args: >-
               --no-default-features --features testkdf --test vault --
               --exact t_vault_1_model_matches_reference
@@ -551,13 +614,116 @@ jobs:
           cargo +nightly miri test --locked ${{ matrix.args }}
           -Zunstable-options --report-time
 
+  sanitizers-asan:
+    # T-SAN-1 (spec 14.11; spec 15.3 lists it under `sanitizers`): the full
+    # test suite under AddressSanitizer, nightly, in the four debug
+    # configurations of `test`, under xvfb-run so the clipboard tests run
+    # too. The PTY tests' `pwv` children are the same ASan build.
+    # Owner decisions (2026-11-16; DESIGN_NOTES, M9):
+    # - tests/mem.rs (T-MEM-4's canary scan) is left out: its scanner reads
+    #   every readable mapping, and ASan's shadow memory is a reserved
+    #   mapping of terabytes. T-MEM-4 itself runs in `e2e`.
+    # - LeakSanitizer is on. A harmless report would get a named, dated
+    #   suppression, never detect_leaks=0.
+    # handle_segv=0: T-MEM-2 and T-MEM-5 need a SIGSEGV to kill the child
+    # (ASan would catch it and exit 1 instead). log_path: a child's report
+    # would otherwise go to its PTY, which tests never print, so reports go
+    # to files and the last step fails if there is any.
+    # RUSTFLAGS replaces .cargo/config.toml's link hardening: acceptable for
+    # a test build (T-REPRO-1's script checks the release artefact).
+    # Provisional cap 120 until measured.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--features memtest", "--features testkdf", "--features memtest,testkdf"]
+    name: sanitizers-asan (${{ matrix.features || 'default' }})
+    env:
+      PWV_REQUIRE_X11: "1"
+      RUSTFLAGS: -Zsanitizer=address
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly, Xvfb, xclip, llvm-symbolizer
+        run: |
+          rustup toolchain install nightly --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y xvfb xclip llvm
+          command -v llvm-symbolizer  # readable stack traces in reports
+      - name: T-SAN-1 (every test target except tests/mem.rs)
+        run: |
+          mkdir -p "$RUNNER_TEMP/asan"
+          export ASAN_OPTIONS="detect_leaks=1:handle_segv=0:log_path=$RUNNER_TEMP/asan/report"
+          targets=""
+          for f in tests/*.rs; do
+            n=$(basename "$f" .rs)
+            [ "$n" = mem ] || targets="$targets --test $n"
+          done
+          sh scripts/ci_guard.sh xvfb-run -a cargo +nightly test --locked --no-fail-fast \
+            --target x86_64-unknown-linux-gnu --lib --bins $targets ${{ matrix.features }}
+      - name: No AddressSanitizer report from any process
+        if: always()
+        run: |
+          if ls "$RUNNER_TEMP"/asan/report* >/dev/null 2>&1; then
+            # Reports hold stack traces, addresses, and shadow bytes, never
+            # memory contents.
+            cat "$RUNNER_TEMP"/asan/report*
+            exit 1
+          fi
+          echo "no reports"
+
+  test-arm64:
+    # Spec 15.3: "an aarch64 runner nightly" (owner, 2026-11-16: the
+    # repository is public, so GitHub's Arm runners are available). The five
+    # configurations of `test`, nightly and on "Run workflow". The arena
+    # and the T-MEM-4 scanner use the kernel's page size (an arm64 kernel
+    # may use 16 or 64 KiB pages; DESIGN_NOTES, M9).
+    # If the runner label does not exist, the job waits for a runner and
+    # never starts: check the label against GitHub's runner list.
+    # Provisional cap 150 until measured.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: |
+          uname -m
+          getconf PAGESIZE
+          rustup show active-toolchain || rustup toolchain install
+      - run: mkdir -p logs
+      - name: Debug, default features
+        run: sh scripts/ci_guard.sh cargo test --locked 2>&1 | tee logs/default.txt
+      - name: Debug, memtest
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest 2>&1 | tee logs/memtest.txt
+      - name: Release
+        run: sh scripts/ci_guard.sh cargo test --locked --release 2>&1 | tee logs/release.txt
+      - name: Debug, testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features testkdf 2>&1 | tee logs/testkdf.txt
+      - name: Debug, memtest + testkdf
+        run: sh scripts/ci_guard.sh cargo test --locked --features memtest,testkdf 2>&1 | tee logs/memtest-testkdf.txt
+      - name: Gate by name on arm64 (every ID whose tests run in `test`)
+        run: >-
+          python3 -I scripts/test_ids.py --require
+          T-KAT-1,T-KAT-2,T-COMPAT-1,T-FMT-1,T-FMT-2,T-FMT-3,T-FMT-4,T-CRY-1,T-CRY-2,T-CRY-3,T-CRY-4,T-CRY-5,T-CRY-6,T-GEN-1,T-GEN-2,T-GEN-3,T-GEN-4,T-GEN-5,T-GEN-6,T-STORE-2,T-STORE-3,T-STORE-4,T-STORE-5,T-STORE-6,T-STORE-7,T-STORE-9,T-VAULT-1,T-VAULT-2,T-MEM-1,T-MEM-2,T-MEM-3,T-MEM-4,T-MEM-5,T-MEM-6,T-MEM-7,T-ENG-2,T-ENG-3,T-ENG-4
+          --logs logs/*.txt
+      - name: Keep the arm64 test logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-logs-arm64
+          path: logs/
+          retention-days: 30
+
   durability:
     # T-STORE-3 at the nightly size of Section 15.3 (5,000 SIGKILLs at a
-    # uniform 0-50 ms into the save loop), on every push and daily, against
-    # the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
-    # Measured 3m24 (M6 round 1).
+    # uniform 0-50 ms into the save loop), nightly and on "run now" (every
+    # push until M9), against the runner's ext4 disk. T-STORE-8 (LazyFS) is added in M9.
+    # Measured 3m24 (M6 round 1), 4m07 (M8 round 2).
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 11
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v5
       - name: T-STORE-3 kill loop, 5,000 iterations (release)

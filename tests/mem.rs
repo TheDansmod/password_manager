@@ -110,7 +110,12 @@ mod scan {
             .collect()
     }
 
-    const PAGE: usize = 4096;
+    /// The kernel's page size: `pagemap` has one entry per page, and guard
+    /// regions are whole pages (4 KiB on x86_64; an arm64 kernel may use
+    /// 16 or 64 KiB, where a fixed 4096 would index the wrong entries).
+    fn page() -> usize {
+        rustix::param::page_size()
+    }
 
     /// Whether the page at `addr` is a guard region (`madvise(
     /// MADV_GUARD_INSTALL)`, Linux 6.13): `pagemap` bit 58
@@ -120,7 +125,7 @@ mod scan {
     /// (DESIGN_NOTES, M8 CI round 1).
     fn is_guard(pagemap: &std::fs::File, addr: usize) -> bool {
         let mut e = [0u8; 8];
-        let at = (addr / PAGE * 8) as u64;
+        let at = (addr / page() * 8) as u64;
         pagemap.read_exact_at(&mut e, at).is_ok() && u64::from_le_bytes(e) >> 58 & 1 == 1
     }
 
@@ -152,10 +157,10 @@ mod scan {
             if mem.read_exact_at(&mut data, m.start as u64).is_err() {
                 // Page by page: only guard pages may fail (see `is_guard`).
                 let (mut bad, mut ok) = (0, 0);
-                for (k, page) in data.chunks_mut(PAGE).enumerate() {
-                    let addr = m.start + k * PAGE;
-                    if mem.read_exact_at(page, addr as u64).is_ok() {
-                        ok += page.len();
+                for (k, chunk) in data.chunks_mut(page()).enumerate() {
+                    let addr = m.start + k * page();
+                    if mem.read_exact_at(chunk, addr as u64).is_ok() {
+                        ok += chunk.len();
                     } else if is_guard(&pagemap, addr) {
                         out.guards += 1;
                     } else {
@@ -169,7 +174,7 @@ mod scan {
                         m.perms,
                         m.path,
                         bad,
-                        data.len() / PAGE
+                        data.len() / page()
                     ));
                 }
             } else {
@@ -276,6 +281,16 @@ mod scan {
 
     fn x11() -> bool {
         std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+    }
+
+    /// The X clipboard is one global resource (`xvfb-run` gives the whole
+    /// test binary one display): the tests that copy take turns, as in
+    /// `tests/clip.rs`. Without this, one test's `copy`, `gen`, or expiry
+    /// replaced the selection another test was about to paste.
+    static X: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn turn() -> std::sync::MutexGuard<'static, ()> {
+        X.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// What another X client reads from the CLIPBOARD selection.
@@ -387,6 +402,7 @@ mod scan {
 
     #[test]
     fn t_mem_4_canary_scan_mid_session_and_after_lock() {
+        let _x = turn();
         let clipboard = display();
         let home = seeded();
         let (mut p, arena) = session(&home, "300");
@@ -485,6 +501,7 @@ mod scan {
     /// revealed and copied.
     #[test]
     fn t_mem_4_signal_eof_and_idle_exits_are_wiped() {
+        let _x = turn();
         let clipboard = display();
         let home = seeded();
         for how in ["SIGTERM", "SIGHUP", "eof", "idle"] {
@@ -518,15 +535,16 @@ mod scan {
     fn scan_skips_guard_pages_and_nothing_else() {
         use std::io::{BufRead, Write};
         const CHILD: &str = r#"
-import ctypes, sys
+import ctypes, mmap, sys
+P = mmap.PAGESIZE
 libc = ctypes.CDLL(None, use_errno=True)
 libc.mmap.restype = ctypes.c_void_p
 libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
 libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-a = libc.mmap(None, 3 * 4096, 3, 0x22, -1, 0)
+a = libc.mmap(None, 3 * P, 3, 0x22, -1, 0)
 for page in (0, 2):
-    ctypes.memmove(a + page * 4096 + 100, b"CANARY-mem-guard-test", 21)
-ok = libc.madvise(a + 4096, 4096, 102) == 0  # MADV_GUARD_INSTALL
+    ctypes.memmove(a + page * P + 100, b"CANARY-mem-guard-test", 21)
+ok = libc.madvise(a + P, P, 102) == 0  # MADV_GUARD_INSTALL
 print(f"ready {a}" if ok else "unsupported", flush=True)
 sys.stdin.read()
 "#;
@@ -557,7 +575,7 @@ sys.stdin.read()
         let other: Vec<_> = s.unread.iter().filter(|u| !u.contains("\"[v")).collect();
         assert!(other.is_empty(), "unreadable: {other:?}");
         let base = base.expect("base");
-        for at in [base + 100, base + 2 * PAGE + 100] {
+        for at in [base + 100, base + 2 * page() + 100] {
             assert!(
                 s.hits.iter().any(|h| h.canary == 0 && h.addr == at),
                 "a canary next to the guard page was missed"
