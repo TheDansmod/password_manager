@@ -902,10 +902,10 @@ jobs:
     # gpg (as `e2e` does); the others run without a display, so the "no
     # clipboard" paths are measured too. Fixed seeds (determinism). Release
     # builds, Miri, sanitizers, fuzzing, mutants and `durability` are not
-    # included (spec). The test runs measured 10m46 to 21m33 (M9 round 2,
-    # where the report failed); cap 65 (3x the slowest) until a full run.
+    # included (spec). Measured 11m42 to 24m27 (M9 round 4, first full
+    # merge; slowest `memtest`); cap 74 (3x the slowest).
     runs-on: ubuntu-26.04
-    timeout-minutes: 65
+    timeout-minutes: 74
     strategy:
       fail-fast: false
       matrix:

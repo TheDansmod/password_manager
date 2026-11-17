@@ -3078,3 +3078,73 @@ only a few variants.
   `--no-default-features`, all targets).
 - `test_ids.py --check` (81 IDs, 0 to do); `loc_budget.py` (4,478 /
   4,800); `coverage_report.py --self-test`; `sh -n` on every script.
+
+## 2026-11-17 — M9 CI round 4 results; round 5 contents
+
+**Round 4 results (owner's report).** All five `coverage` jobs passed and
+merged (profiles: default 219, memtest 230, memtest-testkdf 201,
+no-default-features 190, testkdf 190; **0 unreadable**, so the
+`store_fsize_child` fix held). Times: memtest 24m27, no-default-features
+14m38, memtest-testkdf 11m42; `coverage-report` 12 s. Only
+`coverage-report` failed, on two gates:
+- T-COV-1, T-COV-2, uncovered-line justification: **pass**. Lines:
+  crypto 100 %, format 100 %, gen 100 %, store 99.04 %, vault 99.76 %;
+  overall 96.05 %. The only uncovered lines in the five gated modules are
+  the four justified exceptions. `sys.rs:423` is now covered.
+- **T-COV-3 failed on `sys.rs:453`**, the T-MEM-2 guard-page write
+  (`GuardedRegion::probe_guard`, memtest only). Its only callers are the
+  probe children, which die by SIGSEGV and so write no profile (spec
+  14.13, "Runs excluded"). Every line of `probe_guard` had count 0.
+- **T-COV-4 failed on `secmem.rs`** (lines -1.33 pp against the
+  default-only baseline): the memtest-only wrapper
+  `SecureArena::probe_guard` (`secmem.rs:157-159`), same cause. This is
+  the risk recorded in round 4.
+
+**Round 5 contents.**
+- **T-MEM-2 probe children write their profile (`tests/secmem.rs`).**
+  The spec allows no T-COV-3 exception except `cfg(miri)` blocks, so the
+  block must run natively, and it does; only the record was missing.
+  Under `cfg(coverage)` (set by `cargo llvm-cov`), the child installs a
+  one-shot SIGSEGV handler (`SA_RESETHAND`) that calls the profiler
+  runtime's `__llvm_profile_write_file` and returns. The default action
+  is back in place, so the faulting write runs again and the child still
+  dies by SIGSEGV: the test's assertion is unchanged and nothing in
+  `src/` changed. Counters are incremented on entry to each region, so the
+  counts include the block. The handler is not async-signal-safe in
+  general; here the fault comes from the probe's own write, not from libc
+  or the allocator. **Checked locally** with
+  `RUSTFLAGS="-C instrument-coverage --cfg coverage"` and a
+  `LLVM_PROFILE_FILE` in `/tmp`: the T-MEM-2 tests pass (both children die
+  by SIGSEGV) and three test-binary profiles (parent and both children)
+  with a valid raw-profile header are written; without `--cfg coverage`,
+  only the parent's. The counters themselves can only be read in CI (no
+  local `llvm-profdata`). Non-coverage builds compile none of this.
+- **`Cargo.toml`:** `[lints.rust] unexpected_cfgs` with
+  `check-cfg = ["cfg(coverage)"]`, so ordinary builds accept the cfg name.
+  No other lint changes.
+- **`tests/secmem.rs`: new `error_messages_are_fixed_and_distinct`**
+  (stricter): every `secmem::Error` message is non-empty printable ASCII
+  and distinct, `Map(e)` passes each of the seven `sys::Error` messages
+  through unchanged, and no two of all these messages are equal. This
+  covers `secmem.rs:43-52`.
+- **Baseline (T-COV-4) re-recorded** from round 4's five-run
+  `baseline-candidate.json` (`recorded_from` lists all five runs). This
+  lowers `secmem.rs` (92.37 → 91.04 lines, 87.03 → 86.06 regions),
+  `sys.rs` regions (89.64 → 89.57) and `alloc.rs` regions (by less than
+  0.01), and raises every other module. The lowering is not a regression:
+  the old figures came from the default run only, and the five-run merge
+  is the measure the spec defines. Round 5's new tests should put
+  `secmem` and `sys` above these figures; the baseline is raised from
+  round 5's candidate next round.
+- **`coverage` cap 65 → 74:** 3× the memtest run's 24m27.
+- **`scripts/coverage_run.sh`:** header comment notes the T-MEM-2
+  exception to "SIGSEGV writes no profile".
+
+**Still uncovered, not gated (for the record).** `secmem.rs:75` (mapping
+failure) and `:218` (defensive alignment check). `sys.rs`, `alloc.rs`,
+`term.rs`, `clip.rs` and `cli.rs` are not in T-COV-1's five modules. They
+are covered by T-COV-4's no-regression rule only.
+
+**Local checks (2026-11-17).** `cargo test --test secmem` (default and
+`memtest`); the instrumented T-MEM-2 check above; fmt; clippy
+`-D warnings` (default, `memtest`, `--no-default-features`, all targets).

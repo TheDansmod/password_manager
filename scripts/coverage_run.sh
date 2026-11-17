@@ -15,7 +15,9 @@
 # tests' `pwv` children are the instrumented binary and inherit
 # LLVM_PROFILE_FILE (`pwv-%p-%m.profraw`), so they write their own
 # profiles when they exit through `std::process::exit`. Processes killed by
-# SIGKILL or SIGSEGV write none (expected; spec 14.13).
+# SIGKILL or SIGSEGV write none (expected; spec 14.13), except the T-MEM-2
+# probe children, which write theirs from a one-shot SIGSEGV handler
+# (`cfg(coverage)`, tests/secmem.rs) so the probe's `unsafe` block counts.
 #
 # Determinism (spec 14.13): proptest seeds come from PROPTEST_RNG_SEED and
 # T-STORE-3's from PWV_T_STORE_3_SEED, both fixed by the caller; case

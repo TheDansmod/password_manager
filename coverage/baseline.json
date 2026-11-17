@@ -5,20 +5,20 @@
       "regions": 93.41
     },
     "cli.rs": {
-      "lines": 94.57,
-      "regions": 92.41
+      "lines": 94.9,
+      "regions": 92.79
     },
     "clip.rs": {
-      "lines": 80.95,
-      "regions": 81.48
+      "lines": 87.5,
+      "regions": 88.51
     },
     "crypto.rs": {
-      "lines": 95.89,
-      "regions": 94.55
+      "lines": 100.0,
+      "regions": 96.98
     },
     "format.rs": {
-      "lines": 87.97,
-      "regions": 88.04
+      "lines": 100.0,
+      "regions": 93.7
     },
     "gen.rs": {
       "lines": 100.0,
@@ -33,27 +33,31 @@
       "regions": 100.0
     },
     "secmem.rs": {
-      "lines": 92.37,
-      "regions": 87.03
+      "lines": 91.04,
+      "regions": 86.06
     },
     "store.rs": {
-      "lines": 92.93,
-      "regions": 91.64
+      "lines": 99.04,
+      "regions": 95.18
     },
     "sys.rs": {
-      "lines": 89.89,
-      "regions": 89.64
+      "lines": 90.82,
+      "regions": 89.57
     },
     "term.rs": {
-      "lines": 90.85,
-      "regions": 90.71
+      "lines": 92.16,
+      "regions": 91.43
     },
     "vault.rs": {
-      "lines": 98.34,
-      "regions": 95.88
+      "lines": 99.76,
+      "regions": 96.77
     }
   },
   "recorded_from": [
-    "coverage-default"
+    "coverage-default",
+    "coverage-memtest",
+    "coverage-memtest-testkdf",
+    "coverage-no-default-features",
+    "coverage-testkdf"
   ]
 }
