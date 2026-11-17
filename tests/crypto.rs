@@ -213,6 +213,34 @@ fn kdf_memlock_child() {
     if r != Err(crypto::Error::KdfUnlocked) || !s.kek.is_empty() {
         std::process::exit(11);
     }
+    // `vault::init` and `vault::unlock` pass the refusal on and leave no key
+    // or password behind (M9: T-COV-1 found both error paths unexecuted).
+    match vault::init(b"pw", p, &mut s.kek, &mut s.dek, true) {
+        Err(vault::Error::Crypto(crypto::Error::KdfUnlocked))
+            if s.kek.is_empty() && s.dek.is_empty() => {}
+        _ => std::process::exit(13),
+    }
+    let Ok((mut h, _)) = vault::init(b"pw", p, &mut s.kek, &mut s.dek, false) else {
+        std::process::exit(14);
+    };
+    write_body(&vaults::sample_model(), &mut s.vault_a);
+    let Ok(file) = vault::save(s.dek.expose(), &mut h, s.vault_a.expose_mut()) else {
+        std::process::exit(15);
+    };
+    put(&mut s.pw1, b"pw");
+    match vault::unlock(
+        &file,
+        &mut s.pw1,
+        &mut s.pw2,
+        &mut s.kek,
+        &mut s.dek,
+        &mut s.vault_b,
+        true,
+    ) {
+        Err(vault::Error::Crypto(crypto::Error::KdfUnlocked))
+            if s.pw1.is_empty() && s.pw2.is_empty() && s.kek.is_empty() => {}
+        _ => std::process::exit(16),
+    }
     match crypto::derive_kek(b"pw", &[1; 32], p, &mut s.kek, false) {
         Ok(out) if !out.locked && s.kek.len() == 32 => std::process::exit(42),
         _ => std::process::exit(12),
@@ -225,7 +253,7 @@ fn kdf_lock_failure_refused_only_when_required() {
     assert_eq!(
         out.status.code(),
         Some(42),
-        "10/11/12: see kdf_memlock_child"
+        "10 to 16: see kdf_memlock_child"
     );
     assert_eq!(
         cli::exit_code(vault::Error::Crypto(crypto::Error::KdfUnlocked)),
@@ -471,6 +499,13 @@ fn t_cry_4_passwd_rotates_everything() {
     let new_file = vault::save(s.new_dek.expose(), &mut nh, s.vault_a.expose_mut()).unwrap();
     vault::adopt_dek(&mut s.dek, &mut s.new_dek).unwrap();
     assert!(s.new_dek.is_empty());
+    // A second adoption finds no key and changes nothing (M9: T-COV-1).
+    let adopted = s.dek.expose().to_vec();
+    assert_eq!(
+        vault::adopt_dek(&mut s.dek, &mut s.new_dek),
+        Err(vault::Error::Crypto(crypto::Error::Length))
+    );
+    assert_eq!(s.dek.expose(), &adopted[..]);
     assert_ne!(s.dek.expose(), &old_dek[..], "DEK rotated");
     assert_ne!(nh.salt, h.salt);
     assert_ne!(nh.wrap_nonce, h.wrap_nonce);
@@ -769,4 +804,31 @@ fn make_goldens() -> Vec<(Golden, Vec<u8>)> {
         bytes,
     ));
     out
+}
+
+/// Every `crypto::Error` has a fixed, non-empty, printable message of its
+/// own (M9: T-COV-1 found most `message` arms unexecuted). Only `Auth` may
+/// mention the password, and only as one of two indistinguishable causes.
+#[test]
+fn error_messages_are_fixed_and_distinct() {
+    use crypto::Error as C;
+    let all = [
+        C::Auth,
+        C::Password,
+        C::KdfParams,
+        C::Kdf,
+        C::KdfUnlocked,
+        C::Random,
+        C::Length,
+    ];
+    let mut seen = HashSet::new();
+    for e in all {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+    assert_eq!(C::Auth.message(), "wrong password or damaged vault");
 }

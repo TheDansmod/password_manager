@@ -98,6 +98,9 @@ with open(path, "w", encoding="utf-8") as f:
 EOF
 
 # Errors of `report` also go to report.log, which the artefact keeps.
+# `report` takes no build options (`--features` and `--no-default-features`
+# are rejected: M9 CI round 3); it reads the profiles and binaries this run
+# left in the target directory, which `clean` emptied first.
 report() {
   if ! cargo llvm-cov report "$@" 2>> "$out/report.log"; then
     echo "cargo llvm-cov report failed:"
@@ -105,10 +108,10 @@ report() {
     exit 1
   fi
 }
-report "$@" --lcov --output-path "$out/lcov.info"
-report "$@" --json --output-path "$out/cov.json"
-report "$@" --html --output-dir "$out/html"
+report --lcov --output-path "$out/lcov.info"
+report --json --output-path "$out/cov.json"
+report --html --output-dir "$out/html"
 # The per-file summary table (counts only) for the job log.
-report "$@"
+report
 test -s "$out/unsafe_blocks.tsv" || { echo "tests/eng.rs did not write the unsafe block list"; exit 1; }
 exit "$status"

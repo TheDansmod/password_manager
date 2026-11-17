@@ -1,0 +1,59 @@
+{
+  "modules": {
+    "alloc.rs": {
+      "lines": 80.0,
+      "regions": 93.41
+    },
+    "cli.rs": {
+      "lines": 94.57,
+      "regions": 92.41
+    },
+    "clip.rs": {
+      "lines": 80.95,
+      "regions": 81.48
+    },
+    "crypto.rs": {
+      "lines": 95.89,
+      "regions": 94.55
+    },
+    "format.rs": {
+      "lines": 87.97,
+      "regions": 88.04
+    },
+    "gen.rs": {
+      "lines": 100.0,
+      "regions": 98.06
+    },
+    "lib.rs": {
+      "lines": 100.0,
+      "regions": 100.0
+    },
+    "main.rs": {
+      "lines": 100.0,
+      "regions": 100.0
+    },
+    "secmem.rs": {
+      "lines": 92.37,
+      "regions": 87.03
+    },
+    "store.rs": {
+      "lines": 92.93,
+      "regions": 91.64
+    },
+    "sys.rs": {
+      "lines": 89.89,
+      "regions": 89.64
+    },
+    "term.rs": {
+      "lines": 90.85,
+      "regions": 90.71
+    },
+    "vault.rs": {
+      "lines": 98.34,
+      "regions": 95.88
+    }
+  },
+  "recorded_from": [
+    "coverage-default"
+  ]
+}

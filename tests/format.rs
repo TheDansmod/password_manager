@@ -729,6 +729,81 @@ fn t_fmt_2_error_metadata_is_content_free() {
     assert_eq!(Error::Padding.entry(), None);
     assert!(Error::NameOrder(3).message().contains("sorted"));
     assert!(!Error::Magic.message().is_empty());
+    // Every variant (M9: T-COV-1 found most `message`/`entry` arms
+    // unexecuted): a non-empty fixed message of printable ASCII, distinct
+    // per variant, the same for every entry index (content-free: the
+    // index travels in `entry()`, never in the text).
+    let fixed = [
+        Error::HeaderLength,
+        Error::Magic,
+        Error::Version,
+        Error::Flags,
+        Error::KdfId,
+        Error::Reserved,
+        Error::KdfMemory,
+        Error::KdfTime,
+        Error::KdfParallelism,
+        Error::Generation,
+        Error::PayloadLength,
+        Error::FileLength,
+        Error::BodyLength,
+        Error::BodyMagic,
+        Error::ContentLength,
+        Error::EntryCount,
+        Error::TrailingBytes,
+        Error::Padding,
+        Error::PaddingLength,
+        Error::Capacity,
+    ];
+    let indexed: [fn(u32) -> Error; 16] = [
+        Error::EntryTruncated,
+        Error::NameLength,
+        Error::NameUtf8,
+        Error::NameControl,
+        Error::NameWhitespace,
+        Error::NameDuplicate,
+        Error::NameOrder,
+        Error::FieldCount,
+        Error::KeyLength,
+        Error::KeyUtf8,
+        Error::KeyControl,
+        Error::KeyDuplicate,
+        Error::FieldFlags,
+        Error::ValueLength,
+        Error::ValueUtf8,
+        Error::ValueControl,
+    ];
+    let mut seen = HashSet::new();
+    for e in fixed {
+        assert_eq!(e.entry(), None, "{e:?}");
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+    for v in indexed {
+        for i in [0, 7, 9_999] {
+            assert_eq!(v(i).entry(), Some(i), "{:?}", v(i));
+            assert_eq!(v(i).message(), v(0).message(), "{:?}", v(i));
+        }
+        // No digit of these indices occurs in any fixed limit (256, 64, 4096).
+        for i in [7, 9_999] {
+            assert!(!v(i).message().contains(&i.to_string()), "{:?}", v(i));
+        }
+        let m = v(0).message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{:?}",
+            v(0)
+        );
+        assert!(
+            seen.insert(m),
+            "{:?}: message shared with another variant",
+            v(0)
+        );
+    }
 }
 
 // ---------------------------------------------------------------- T-FMT-2: header
@@ -870,6 +945,13 @@ fn writer_matches_raw_encoding_and_validates() {
     assert_eq!(serialize(&dup).err(), Some(Error::KeyDuplicate(0)));
     let long_key: Model = vec![("e".into(), vec![("k".repeat(300), false, String::new())])];
     assert_eq!(serialize(&long_key).err(), Some(Error::KeyLength(0)));
+    // A value too long for the 16-bit length field (M9: T-COV-2 found the
+    // writer's `ValueLength` closure unexecuted).
+    let long_value: Model = vec![
+        ("a".into(), vec![]),
+        ("e".into(), vec![("k".into(), false, "v".repeat(65_536))]),
+    ];
+    assert_eq!(serialize(&long_value).err(), Some(Error::ValueLength(1)));
 }
 
 #[test]

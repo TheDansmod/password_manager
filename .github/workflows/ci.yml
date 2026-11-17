@@ -938,6 +938,18 @@ jobs:
             echo "PWV_REQUIRE_X11=1"
             echo "PWV_REQUIRE_GPG=1"
           } >> "$GITHUB_ENV"
+      - name: vfat loop mount (T-STORE-1's real foreign filesystem)
+        # As in `test`: with PWV_FOREIGN_DIR set, the instrumented suite runs
+        # t_store_1_foreign_fs_real_mount too, so the ForeignFs refusal and
+        # the save protocol's copy fallback on a real mount are measured.
+        run: |
+          command -v mkfs.vfat || { sudo apt-get update && sudo apt-get install -y dosfstools; }
+          truncate -s 64M "$RUNNER_TEMP/vfat.img"
+          mkfs.vfat "$RUNNER_TEMP/vfat.img"
+          sudo mkdir -p /mnt/pwv-vfat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)",umask=077 "$RUNNER_TEMP/vfat.img" /mnt/pwv-vfat
+          stat -f -c 'filesystem: %T (magic 0x%t)' /mnt/pwv-vfat
+          echo "PWV_FOREIGN_DIR=/mnt/pwv-vfat" >> "$GITHUB_ENV"
       - name: Instrumented test suite (${{ matrix.name }})
         run: |
           xvfb=""
@@ -993,6 +1005,15 @@ jobs:
             echo "PWV_REQUIRE_X11=1"
             echo "PWV_REQUIRE_GPG=1"
           } >> "$GITHUB_ENV"
+      - name: vfat loop mount (T-STORE-1's real foreign filesystem)
+        # As in `coverage`.
+        run: |
+          command -v mkfs.vfat || { sudo apt-get update && sudo apt-get install -y dosfstools; }
+          truncate -s 64M "$RUNNER_TEMP/vfat.img"
+          mkfs.vfat "$RUNNER_TEMP/vfat.img"
+          sudo mkdir -p /mnt/pwv-vfat
+          sudo mount -o loop,uid="$(id -u)",gid="$(id -g)",umask=077 "$RUNNER_TEMP/vfat.img" /mnt/pwv-vfat
+          echo "PWV_FOREIGN_DIR=/mnt/pwv-vfat" >> "$GITHUB_ENV"
       - name: Instrumented test suite with branches (${{ matrix.name }})
         env:
           RUSTUP_TOOLCHAIN: nightly

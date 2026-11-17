@@ -1106,6 +1106,35 @@ fn state_file_damage_and_permissions_refused() {
         });
         assert_eq!(mode(&p), ok);
     }
+    // M9 (T-COV-1 found these paths unexecuted):
+    // a state file over 1 MiB is refused before it is read;
+    overwrite(&f.paths.state, &vec![b'0'; (1 << 20) + 1]);
+    with_session(&f.paths, &kek, |st, h, _, _| {
+        assert_eq!(st.freshness(h).unwrap_err(), Error::State);
+    });
+    overwrite(&f.paths.state, &good);
+    // no state directory (a vault copied from another machine): fresh, and
+    // the next save creates it;
+    let state_dir = f.paths.state.parent().unwrap().to_owned();
+    fs::remove_dir_all(&state_dir).unwrap();
+    with_session(&f.paths, &kek, |st, h, dek, body| {
+        assert_eq!(st.freshness(h).unwrap(), Freshness::Fresh);
+        write_body(&model(h.generation + 1), body);
+        let file = vault::save(dek, h, body.expose_mut()).unwrap();
+        st.save(&file).unwrap();
+        assert_eq!(st.freshness(h).unwrap(), Freshness::Fresh);
+    });
+    assert!(f.paths.state.is_file());
+    // a symlink in place of the state's lock file: the save's state update
+    // is refused (the vault itself was already replaced, Section 8.3).
+    let lock = state_dir.join("state.lock");
+    let _ = fs::remove_file(&lock);
+    symlink(f.tmp.path().join("elsewhere"), &lock).unwrap();
+    with_session(&f.paths, &kek, |st, h, dek, body| {
+        write_body(&model(h.generation + 1), body);
+        let file = vault::save(dek, h, body.expose_mut()).unwrap();
+        assert_eq!(st.save(&file), Err(Error::Kind));
+    });
 }
 
 // ------------------------------------------------------------ T-STORE-6
@@ -1295,9 +1324,13 @@ fn store_fsize_child() {
     // SAFETY: called before any other thread of this child exists; sets
     // the disposition of SIGXFSZ to "ignore", so the write fails instead.
     unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    // Only the soft limit is lowered, and it is restored afterwards: this
+    // child's coverage profile, written at exit, would otherwise be cut at
+    // 4 KiB too (M9 CI round 3: the one corrupt profile in every run).
+    let old = rustix::process::getrlimit(rustix::process::Resource::Fsize);
     let limit = rustix::process::Rlimit {
         current: Some(4096),
-        maximum: Some(4096),
+        maximum: old.maximum,
     };
     rustix::process::setrlimit(rustix::process::Resource::Fsize, limit).unwrap();
     with_session(&paths, &vaults::unhex(&kek), |st, h, dek, body| {
@@ -1307,6 +1340,7 @@ fn store_fsize_child() {
         assert_eq!(st.save(&file), Err(Error::Io));
         assert_eq!(cli::store_exit_code(&Error::Io), cli::EXIT_ENV);
     });
+    rustix::process::setrlimit(rustix::process::Resource::Fsize, old).unwrap();
 }
 
 #[test]
@@ -1345,4 +1379,43 @@ fn save_refuses_malformed_files_and_changes_nothing() {
         }
     });
     assert_eq!(snapshot(&f), before);
+}
+
+/// Every `store::Error` has a fixed, non-empty, printable message of its
+/// own; `Mode` carries its remedy and `Format` the format error's message;
+/// both I/O error types map to `Io` (M9: T-COV-1 found most `message` arms
+/// and both conversions unexecuted).
+#[test]
+fn error_messages_are_fixed_and_distinct() {
+    let fixed = [
+        Error::Path,
+        Error::NoVault,
+        Error::Exists,
+        Error::Kind,
+        Error::Owner,
+        Error::ForeignFs,
+        Error::InUse,
+        Error::State,
+        Error::Io,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in &fixed {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(
+            seen.insert(m.to_owned()),
+            "{e:?}: message shared with another variant"
+        );
+    }
+    let remedy = "group/other permissions set; run: chmod 700 '/x'";
+    assert_eq!(Error::Mode(remedy.to_owned()).message(), remedy);
+    let f = pwv::format::Error::FileLength;
+    assert_eq!(Error::Format(f).message(), f.message());
+    assert!(!seen.contains(f.message()));
+    assert_eq!(Error::from(rustix::io::Errno::IO), Error::Io);
+    assert_eq!(Error::from(std::io::Error::other("disk")), Error::Io);
+    assert!(!Error::Io.message().contains("disk"));
 }

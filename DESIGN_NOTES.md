@@ -2866,10 +2866,14 @@ Uncovered production lines and functions of `format`, `crypto`, `gen`,
 `store`, `vault` that are justified (spec 14.13). Read by
 `scripts/coverage_report.py`: one row per line or range,
 `| src/<file>:<line>[-<line>] | line or function | date | reason |`.
-Empty until the first coverage report.
+First rows from M9 CI round 3 (default run only; see that entry).
 
 | Location | Kind | Date | Reason |
 | --- | --- | --- | --- |
+| `src/store.rs:268` | line | 2026-11-17 | `flock` on a lock file just opened by this process fails with `EWOULDBLOCK` (handled above as `InUse`, tested) or only `EINTR`/`ENOLCK` (signal during a blocking wait; kernel out of lock records), which no test can provoke without fault injection in `sys`. Maps to the generic `Io`. |
+| `src/store.rs:294` | line | 2026-11-17 | The file grew between `fstat` and the read: a writer outside the lock protocol racing this read. Defensive (fails closed as `FileLength`); a deterministic test would need a concurrent writer timed between two syscalls. |
+| `src/store.rs:451` | line | 2026-11-17 | `link(2)` failing with anything but `NOENT` / `PERM` / `OPNOTSUPP` / `NOSYS` (all tested; `PERM` through the step hook and on vfat): `EMLINK`, `ENOSPC`, `EIO`, or `EEXIST` from a file created at `.1` by someone else after the rotation. Not reproducible without fault injection; the save fails before the vault is touched. |
+| `src/vault.rs:311` | line | 2026-11-17 | `user()` maps `BodyWriter` errors of a rewrite. Every input is validated before `emit` (`input_validation_is_checked_first_and_named`) and the items come from a canonical body, so only `Capacity` (line 310, tested) can occur; the `Invalid` arm is defensive. |
 
 ### Surviving mutants
 
@@ -2968,3 +2972,109 @@ by the tests, other runs may differ.
   command fail).
 
 `src/` and `tests/` unchanged (LOC 4,478 / 4,800).
+
+## 2026-11-17 — M9 CI round 3 results; round 4 contents
+
+**Push run on the M9 branch (owner's report).** Every job green except four
+`coverage` runs and `coverage-report`. Times: `test` 33m23, `e2e` 6m41,
+`coverage` 17m36 to 19m26 (cap 65 holds), `coverage-report` 8 s.
+
+- **Unreadable profiles: fixed by round 3, cause now found.** Every run
+  set aside exactly one profile ("file header is corrupt"; 219, 230, 190,
+  190 and 201 profiles). Exactly one per run pointed at a deterministic
+  writer. It was `store_fsize_child` (`failed_save_leaves_vault_state_and_no_temp_file`),
+  which sets `RLIMIT_FSIZE` to 4 KiB, soft and hard, so the save's write
+  fails with `EFBIG`. The same limit cut its own coverage profile at exit.
+  That is also why `store.rs:485` (the temporary file's removal after a
+  failed write) looked unexecuted. The child now lowers only the soft limit
+  and restores it after its assertions, so its profile is complete. The
+  test checks exactly what it did before. The set-aside step stays as a
+  guard and still reports its count.
+- **`report` rejects build options.** The four failing runs stopped at
+  `error: invalid option '--features' for subcommand 'report'` (or
+  `--no-default-features`). `coverage_run.sh` passed the run's cargo
+  arguments to `report`; it now passes none, because `report` reads the
+  profiles and binaries this run left in the cleaned target directory. Only
+  `coverage (default)`, which has no arguments, produced a report, so
+  `coverage-report` merged that run alone. The four other runs will merge
+  next time.
+
+**Default-run figures** (all five gated modules except `format` and `store`
+already pass T-COV-1): `format` 87.97 % lines, `store` 92.93 %, `crypto`
+95.89 %, `vault` 98.34 %, `gen` 100 %; overall 93.51 % (threshold 85 %).
+80 uncovered lines or functions in the gated modules. Most were the arms
+of the error types' `message()` and `entry()`, which the tests called for
+only a few variants.
+
+**Changes (round 4).**
+- **Tests** (stricter or new; `src/` unchanged):
+  - `tests/format.rs`: `t_fmt_2_error_metadata_is_content_free` now checks
+    every `format::Error` variant. Each message is non-empty printable
+    ASCII and distinct per variant, and the same for every entry index
+    (the index never appears in the text). `entry()` is `Some(i)` exactly
+    for the 16 entry-scoped variants.
+  - `writer_matches_raw_encoding_and_validates`: a 65,536-byte value is
+    refused with `ValueLength(1)`. This is the writer's 16-bit length
+    check, the function T-COV-2 found unexecuted (`format.rs:654`).
+  - `tests/crypto.rs`:
+    - new test `error_messages_are_fixed_and_distinct`;
+    - `kdf_memlock_child` (`RLIMIT_MEMLOCK` = 0) now also checks that
+      `vault::init` and `vault::unlock` with `require_locked` return
+      `Crypto(KdfUnlocked)` and leave the KEK, DEK and password slots empty
+      (`vault.rs:154-156, 221`; exit codes 13 to 16);
+    - the passwd lifecycle checks that a second `adopt_dek` returns
+      `Crypto(Length)` and leaves the DEK unchanged (`vault.rs:275`).
+  - `tests/store.rs`:
+    - new test `error_messages_are_fixed_and_distinct`, which also covers
+      both I/O conversions to `Io`;
+    - `state_file_damage_and_permissions_refused` adds three cases: a
+      state file over 1 MiB is refused as `State`; a missing state
+      directory reads as fresh, and the next save recreates it; a symlink
+      in place of the state lock makes the save fail with `Kind`
+      (`store.rs:498, 509, 524, 547`).
+  - `tests/vault.rs`: `error_messages_are_fixed_and_content_free` now
+    checks every variant. The `Format`, `Invalid` and `Crypto` messages
+    pass through unchanged.
+- **`coverage` and `coverage-branch`** mount vfat, as `test` does, and set
+  `PWV_FOREIGN_DIR`. The instrumented suite then runs
+  `t_store_1_foreign_fs_real_mount`, which measures the `ForeignFs`
+  refusal (`store.rs:248`) and the copy fallback on a real mount.
+- **`coverage_report.py`:**
+  - T-COV-3 counts only regions that overlap the `unsafe { .. }` block's
+    own column span. `sys.rs:379` failed only because of the `?` of
+    `.map_err(..)?` after the block on the same line; that is T-COV-1's
+    business. The column span comes from the raw source line (string,
+    char and `//` aware); unplaceable blocks fall back to whole lines.
+  - T-COV-1 to T-COV-5 in the test-ID table come from the report's own
+    per-ID gate results. A failure of one gate no longer marks the others
+    failed, and T-COV-5 is "not run" without branch data, so on pushes.
+    Both have self-tests.
+  - Rerun locally on the round-3 default artefact: `sys.rs:379` covered,
+    T-COV-5 "not run".
+- **`sys.rs:423`** (`GuardedRegion::data`) and **`sys.rs:453`** (the guard
+  page write) are reached only through `memtest` code (`raw_data`,
+  `close_with_snapshot`, T-MEM-2), so the memtest runs, merged next time,
+  should cover them.
+- **Baseline (T-COV-4): `coverage/baseline.json` committed** from this
+  round's `baseline-candidate.json`. It holds the default run's figures
+  per module, `recorded_from: ["coverage-default"]`. Adding runs and tests
+  can only add covered lines and regions. The one way a module could fall
+  is through code compiled only in other configurations (`memtest` items
+  in `sys`, `secmem`, `alloc`, `crypto`), which enters the denominator
+  when those runs merge. If that drops a module by more than 0.5 pp, the
+  baseline is raised or lowered in the next round, with a dated entry
+  (spec). After the first full merge, the baseline is re-recorded from
+  all five runs.
+- **Coverage exceptions:** four dated rows in the "Coverage exceptions"
+  table (`store.rs:268, 294, 451`; `vault.rs:311`). Each is an error path
+  that only fault injection or a race could reach, or a defensive arm
+  behind validation. Lines the other runs leave uncovered are judged next
+  round.
+
+**Local checks (2026-11-17).**
+- `cargo test`: `format` and `crypto` (all), `store` and `vault` (all;
+  334 s); `eng`.
+- fmt; clippy `-D warnings` (default, `memtest,testkdf`,
+  `--no-default-features`, all targets).
+- `test_ids.py --check` (81 IDs, 0 to do); `loc_budget.py` (4,478 /
+  4,800); `coverage_report.py --self-test`; `sh -n` on every script.

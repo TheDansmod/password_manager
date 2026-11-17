@@ -241,19 +241,84 @@ def exceptions(notes_path):
 
 # ---------------------------------------------------------------- report
 
+def block_span(lines, a, b):
+    """((a, first col), (b, col after the closing brace)) of the
+    `unsafe { .. }` block starting on line `a` and ending on line `b`
+    (1-based lines, 1-based byte columns as in llvm-cov), or None if it
+    cannot be placed. String and char literals and `//` comments are
+    skipped while matching braces; the T-ENG-2 scanner found the block."""
+    if not (0 < a <= b <= len(lines)):
+        return None
+    first = lines[a - 1].encode()
+    m = re.search(rb"\bunsafe\s*\{", first)
+    if not m:
+        return None
+    depth, start = 0, None
+    for n in range(a, b + 1):
+        s = lines[n - 1].encode()
+        i = m.end() - 1 if n == a else 0
+        in_str = False
+        while i < len(s):
+            c = s[i:i + 1]
+            if in_str:
+                if c == b"\\":
+                    i += 1
+                elif c == b'"':
+                    in_str = False
+            elif c == b'"':
+                in_str = True
+            elif s[i:i + 2] == b"//":
+                break
+            elif c == b"'" and s[i + 2:i + 3] == b"'":
+                i += 2  # a char literal such as '{'
+            elif c == b"{":
+                depth += 1
+                start = start or (a, m.start() + 1)
+            elif c == b"}":
+                depth -= 1
+                if depth == 0:
+                    return (start, (n, i + 2)) if n == b else None
+            i += 1
+    return None
+
+
 def unsafe_status(src, runs, block):
-    """T-COV-3 status of one block: 'covered', 'miri-only', or a failure."""
+    """T-COV-3 status of one block: 'covered', 'miri-only', or a failure.
+    Counted: the block's lines and every region overlapping the block's own
+    column span, so code after the closing brace on the same line (such as
+    `.map_err(..)?` of the call's error path) is judged by T-COV-1, not here."""
     f, a, b = block
     span = set(range(a, b + 1))
     if span & src.miri.get(f, set()):
         return "miri-only (excluded; T-SAN-2)"
-    regs = [c for k, c in runs.regions.items() if k[0] == f and a <= k[1] <= b]
+    cols = block_span(src.text.get(f, []), a, b)
+    if cols is None:
+        regs = [c for k, c in runs.regions.items() if k[0] == f and a <= k[1] <= b]
+    else:
+        lo, hi = cols
+        regs = [c for k, c in runs.regions.items()
+                if k[0] == f and (k[1], k[2]) < hi and (k[3], k[4]) > lo]
     lines = [c for n, c in runs.lines.get(f, {}).items() if a <= n <= b]
     if not regs and not lines:
         return "FAIL: no coverage data"
     if any(c == 0 for c in regs) or any(c == 0 for c in lines):
         return "FAIL: not fully covered"
     return "covered"
+
+
+def own_cov_verdict(tid, verdict, fails, branches_measured):
+    """Verdict of T-COV-1 .. T-COV-5 from this report's gate failures (each
+    failure text names the IDs it fails); other IDs keep `verdict`. A passing
+    gate keeps `verdict`, so other evidence (T-COV-3's tests, the
+    `coverage-branch` job) still counts. T-COV-5 is "not run" without
+    branch data (push runs)."""
+    m = re.fullmatch(r"T-COV-([1-5])", tid)
+    if not m:
+        return verdict
+    if tid == "T-COV-5" and not branches_measured:
+        return "not run"
+    named = {n for x in fails for n in re.findall(r"T-COV-([1-5])", x)}
+    return "fail" if m.group(1) in named else verdict
 
 
 def badge(label, value, color):
@@ -413,8 +478,12 @@ def report(args):
     if args.get("jobs") and os.path.isfile(args["jobs"]):
         with open(args["jobs"], encoding="utf-8") as f:
             jobs = {k: v.get("result") for k, v in json.load(f).items()}
-    jobs["coverage-report"] = "failure" if fails else "success"
-    rows = test_ids.verdicts(list(args.get("logs", [])) + runs.logs, jobs)
+    # T-COV-1 .. T-COV-5 come from this report's own gates, one ID at a
+    # time: a failure of one gate must not mark the others failed (M9 CI
+    # round 3 showed T-COV-5 "fail" on a push, where it is not measured).
+    jobs["coverage-report"] = "success"
+    rows = [(tid, ms, own_cov_verdict(tid, v, fails, bool(branch_runs.names)))
+            for tid, ms, v in test_ids.verdicts(list(args.get("logs", [])) + runs.logs, jobs)]
     passing = sum(1 for r in rows if r[2] == "pass")
     out.append(f"### Section 14 test IDs ({passing} of {len(rows)} passing)\n")
     out.append("| ID | Milestone | Status |")
@@ -492,6 +561,38 @@ def self_test():
         e = exceptions(p)
     assert e == {("a.rs", "line"): {7}, ("a.rs", "function"): {9, 10, 11}}, e
     assert badge("coverage", "97.1%", "#4c1").startswith("<svg")
+    # T-COV-3 spans (shapes from M9 CI round 2, sys.rs:379 and :423).
+    text = ["    fn f() {",
+            "            unsafe { m(ptr, len, advice) }.map_err(|_| E::Advise)?;",
+            "        unsafe { s(\"}\", '{', x) } // }",
+            "        let a = unsafe {",
+            "            g({ 1 })",
+            "        };"]
+    assert block_span(text, 2, 2) == ((2, 13), (2, 43)), block_span(text, 2, 2)
+    assert block_span(text, 3, 3) == ((3, 9), (3, 34)), block_span(text, 3, 3)
+    assert block_span(text, 4, 6) == ((4, 17), (6, 10)), block_span(text, 4, 6)
+    assert block_span(text, 4, 5) is None and block_span(text, 1, 1) is None
+
+    class R:
+        pass
+    src, runs = R(), R()
+    src.miri, src.text = {}, {"a.rs": text}
+    runs.lines = {"a.rs": {2: 5, 3: 0}}
+    runs.regions = {("a.rs", 2, 13, 2, 43): 5, ("a.rs", 2, 44, 2, 63): 5,
+                    ("a.rs", 2, 88, 2, 89): 0, ("a.rs", 1, 12, 7, 6): 5}
+    assert unsafe_status(src, runs, ("a.rs", 2, 2)) == "covered"
+    runs.regions[("a.rs", 2, 20, 2, 30)] = 0
+    assert unsafe_status(src, runs, ("a.rs", 2, 2)).startswith("FAIL")
+    assert unsafe_status(src, runs, ("a.rs", 3, 3)) == "FAIL: not fully covered"
+    fails = ["format.rs: FAIL T-COV-1, T-COV-2", "T-COV-4: no committed baseline"]
+    assert own_cov_verdict("T-COV-1", "pass", fails, False) == "fail"
+    assert own_cov_verdict("T-COV-3", "pass", fails, False) == "pass"
+    assert own_cov_verdict("T-COV-3", "fail", [], False) == "fail"
+    assert own_cov_verdict("T-COV-5", "fail", fails, False) == "not run"
+    assert own_cov_verdict("T-COV-5", "pass", [], True) == "pass"
+    assert own_cov_verdict("T-COV-5", "pass", ["T-COV-5: x"], True) == "fail"
+    assert own_cov_verdict("T-COV-6", "not run", fails, False) == "not run"
+    assert own_cov_verdict("T-FMT-1", "pass", fails, False) == "pass"
     print("coverage_report self-test ok")
 
 
