@@ -27,6 +27,12 @@ if [ ! -d "$src" ]; then
   fi
 fi
 echo "LazyFS commit: $(git -C "$src" rev-parse HEAD)"
+# CMake 4 (ubuntu-26.04) refuses `cmake_minimum_required` below 3.5, which
+# the TOML library LazyFS fetches at configure time still declares (M9, first
+# full run on main, 2026-11-17). CMake reads this variable from the
+# environment, so it reaches both build.sh scripts and their FetchContent
+# sub-builds without patching LazyFS. Older CMake ignores it.
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
 if [ ! -x "$src/lazyfs/build/lazyfs" ]; then
   (cd "$src/libs/libpcache" && ./build.sh)
   (cd "$src/lazyfs" && ./build.sh)
