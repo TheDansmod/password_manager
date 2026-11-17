@@ -120,19 +120,30 @@ fn output(cmd: &mut std::process::Command) -> std::process::Output {
 
 // ------------------------------------------------------------- fixtures
 
-/// A vault location in a fresh temporary directory.
+/// A vault location in a fresh temporary directory. `foreign`: the
+/// directory is on a filesystem `store` refuses by default (T-STORE-8's
+/// LazyFS mount), so every open passes the `--allow-foreign-fs` override,
+/// which waives only the filesystem check.
 struct Fx {
     tmp: tempfile::TempDir,
     paths: Paths,
+    foreign: bool,
 }
 
 fn fx() -> Fx {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    fx_in(tempfile::tempdir().expect("tempdir"), false)
+}
+
+fn fx_in(tmp: tempfile::TempDir, foreign: bool) -> Fx {
     let paths = Paths {
         vault: tmp.path().join("my data's/pwv/vault.pwv"),
         state: tmp.path().join("state/pwv/state"),
     };
-    Fx { tmp, paths }
+    Fx {
+        tmp,
+        paths,
+        foreign,
+    }
 }
 
 impl Fx {
@@ -193,6 +204,11 @@ fn save_next(st: &mut Store, h: &mut Header, dek: &[u8], body: &mut SecretSlot<'
 /// `model(g)`). Returns the KEK, for fast verification, and every file
 /// written, in order.
 fn create_vault(paths: &Paths, saves: u64) -> (Vec<u8>, Vec<Vec<u8>>) {
+    create_vault_on(paths, saves, false)
+}
+
+/// [`create_vault`], with the filesystem override when `foreign`.
+fn create_vault_on(paths: &Paths, saves: u64, foreign: bool) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut a = arena();
     let mut s = a.slots().unwrap();
     put(&mut s.pw1, PW.as_bytes());
@@ -201,7 +217,7 @@ fn create_vault(paths: &Paths, saves: u64) -> (Vec<u8>, Vec<Vec<u8>>) {
     let (mut h, _) = vault::init(s.pw2.expose(), params, &mut s.kek, &mut s.dek, false).unwrap();
     crypto::derive_kek(s.pw2.expose(), &h.salt, params, &mut s.kek, false).unwrap();
     let kek = s.kek.expose().to_vec();
-    let mut st = create(paths.clone(), false).expect("create");
+    let mut st = create(paths.clone(), foreign).expect("create");
     let files = (0..saves)
         .map(|_| save_next(&mut st, &mut h, s.dek.expose(), &mut s.vault_a))
         .collect();
@@ -291,10 +307,14 @@ fn reported(out: &[u8]) -> Vec<u64> {
 }
 
 fn child_env(f: &Fx) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
         ("PWV_T_VAULT".into(), f.paths.vault.display().to_string()),
         ("PWV_T_STATE".into(), f.paths.state.display().to_string()),
-    ]
+    ];
+    if f.foreign {
+        env.push(("PWV_T_FOREIGN".into(), "1".into()));
+    }
+    env
 }
 
 fn child_paths() -> Option<Paths> {
@@ -602,7 +622,8 @@ fn store_3_child() {
         return;
     };
     let kek = vaults::unhex(&kek);
-    let (mut st, file) = open(paths, false).expect("child open");
+    let foreign = std::env::var_os("PWV_T_FOREIGN").is_some();
+    let (mut st, file) = open(paths, foreign).expect("child open");
     let mut a = arena();
     let mut s = a.slots().unwrap();
     let mut h = vault::open_with_kek(&file, &kek, &mut s.dek, &mut s.vault_a).expect("unlock");
@@ -619,7 +640,7 @@ fn store_3_child() {
 /// and report); it is fresh; every backup decrypts to its own generation's
 /// model; no temporary file survives the open.
 fn verify_after_kill(f: &Fx, kek: &[u8], committed: u64, ctx: &str) -> u64 {
-    let (st, file) = open(f.paths.clone(), false)
+    let (st, file) = open(f.paths.clone(), f.foreign)
         .unwrap_or_else(|e| panic!("{ctx}: open failed: {}", e.message()));
     let (h, m) = open_model(&file, kek);
     let g = h.generation;
@@ -646,10 +667,19 @@ fn verify_after_kill(f: &Fx, kek: &[u8], committed: u64, ctx: &str) -> u64 {
 
 #[test]
 fn t_store_3_kill_loop() {
-    let iterations = std::env::var("PWV_T_STORE_3_ITERATIONS")
+    kill_loop(&fx(), "T-STORE-3", None);
+}
+
+/// The kill loop of T-STORE-3 on `f`. `id` names the test ID in messages
+/// and its environment variables (`PWV_T_STORE_3_ITERATIONS`, `_SEED`).
+/// With `lazy` (T-STORE-8), every kill is followed by a simulated power
+/// loss before the same checks.
+fn kill_loop(f: &Fx, id: &str, lazy: Option<&LazyFs>) {
+    let var = |s: &str| format!("PWV_{}_{s}", id.replace('-', "_"));
+    let iterations = std::env::var(var("ITERATIONS"))
         .map_or(KILL_ITERATIONS_MIN, |v| v.parse().expect("iterations"));
     assert!(iterations >= KILL_ITERATIONS_MIN);
-    let seed = std::env::var("PWV_T_STORE_3_SEED").map_or_else(
+    let seed = std::env::var(var("SEED")).map_or_else(
         |_| {
             let mut b = [0u8; 8];
             crypto::fill_random(&mut b).unwrap();
@@ -657,9 +687,8 @@ fn t_store_3_kill_loop() {
         },
         |v| u64::from_str_radix(v.trim_start_matches("0x"), 16).expect("seed"),
     );
-    let f = fx();
-    let (kek, _) = create_vault(&f.paths, 1);
-    let mut env = child_env(&f);
+    let (kek, _) = create_vault_on(&f.paths, 1, f.foreign);
+    let mut env = child_env(f);
     env.push(("PWV_T_KEK".into(), vaults::hex(&kek)));
     let mut rng = Rng(seed);
     let (mut gen_now, mut none, mut some) = (1u64, 0usize, 0usize);
@@ -694,6 +723,9 @@ fn t_store_3_kill_loop() {
             Some(9),
             "{ctx}: child must die by SIGKILL; stderr:\n{errs}"
         );
+        if let Some(l) = lazy {
+            l.power_loss(&ctx);
+        }
         let gens = reported(&reader.join().unwrap());
         // Reports are consecutive generations starting after the last state.
         for (i, g) in gens.iter().enumerate() {
@@ -705,7 +737,7 @@ fn t_store_3_kill_loop() {
             some += 1;
         }
         let committed = gens.last().copied().unwrap_or(gen_now);
-        gen_now = verify_after_kill(&f, &kek, committed, &ctx);
+        gen_now = verify_after_kill(f, &kek, committed, &ctx);
         let ino = |n: &str| fs::metadata(f.at(n)).map(|m| m.ino()).ok();
         if ino("vault.pwv.1").is_some() && ino("vault.pwv.1") == ino("vault.pwv") {
             window += 1;
@@ -717,7 +749,7 @@ fn t_store_3_kill_loop() {
     }
     pwv::sys::write_stderr(
         format!(
-            "T-STORE-3: seed {seed:#x}, {iterations} kills: {none} before the first \
+            "{id}: seed {seed:#x}, {iterations} kills: {none} before the first \
              commit, {some} after commits; {window} between link and rename \
              (longest run {longest}); final generation {gen_now}\n"
         )
@@ -727,6 +759,114 @@ fn t_store_3_kill_loop() {
     // commits (the remaining kills land inside saves).
     assert!(none > 0 && some > 0, "seed {seed:#x}: {none} / {some}");
     assert!(gen_now > iterations as u64 / 2, "seed {seed:#x}: {gen_now}");
+}
+
+// ------------------------------------------------------------ T-STORE-8
+
+/// A LazyFS mount (github.com/dsrhaslab/lazyfs; nightly `durability` job):
+/// a FUSE filesystem with its own page cache that writes data through to
+/// the backing directory only on `fsync`, and drops everything else on
+/// the `lazyfs::clear-cache` fault command, as a power loss would. Metadata
+/// operations (create, link, rename, unlink) pass straight through.
+struct LazyFs {
+    /// The mount point; the test's vault and state live below it.
+    dir: PathBuf,
+    /// LazyFS's fault FIFO (`[faults] fifo_path`).
+    fifo: PathBuf,
+    /// Optional `fifo_path_completed`: LazyFS writes a line there when a
+    /// fault command has finished.
+    done: Option<PathBuf>,
+}
+
+/// The mount named by `PWV_LAZYFS_DIR` and `PWV_LAZYFS_FIFO`
+/// (`PWV_LAZYFS_DONE` optional); `PWV_REQUIRE_LAZYFS` makes their absence
+/// a failure, so CI cannot pass vacuously.
+fn lazyfs() -> Option<LazyFs> {
+    let dir = std::env::var_os("PWV_LAZYFS_DIR");
+    let fifo = std::env::var_os("PWV_LAZYFS_FIFO");
+    let (Some(dir), Some(fifo)) = (dir, fifo) else {
+        assert!(
+            std::env::var_os("PWV_REQUIRE_LAZYFS").is_none(),
+            "PWV_REQUIRE_LAZYFS is set but PWV_LAZYFS_DIR / PWV_LAZYFS_FIFO are not"
+        );
+        return None;
+    };
+    let done = std::env::var_os("PWV_LAZYFS_DONE").map(PathBuf::from);
+    Some(LazyFs {
+        dir: dir.into(),
+        fifo: fifo.into(),
+        done,
+    })
+}
+
+impl LazyFs {
+    /// Power loss: `lazyfs::clear-cache` drops every write not yet
+    /// `fsync`ed. A probe written without `fsync` just before must lose its
+    /// data, which shows the command has taken effect (and that this mount
+    /// drops unsynced data at all, so the test cannot pass vacuously).
+    fn power_loss(&self, ctx: &str) {
+        use std::io::Write;
+        let probe = self.dir.join("t_store_8_probe");
+        let mut p = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&probe)
+            .expect("probe");
+        p.write_all(&[0x55; 4096]).expect("probe write");
+        drop(p);
+        assert_eq!(fs::metadata(&probe).expect("probe").len(), 4096, "{ctx}");
+        let mut cmd = fs::OpenOptions::new()
+            .write(true)
+            .open(&self.fifo)
+            .expect("LazyFS fault FIFO");
+        cmd.write_all(b"lazyfs::clear-cache\n")
+            .expect("fault command");
+        drop(cmd);
+        if let Some(done) = &self.done {
+            let (tx, rx) = mpsc::channel();
+            let done = done.clone();
+            thread::spawn(move || {
+                let mut line = [0u8; 256];
+                let n = fs::File::open(done).and_then(|mut f| f.read(&mut line));
+                let _ = tx.send(n.is_ok());
+            });
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(60)),
+                Ok(true),
+                "{ctx}: LazyFS did not report the clear-cache as completed"
+            );
+        }
+        let end = Instant::now() + Duration::from_secs(60);
+        while fs::metadata(&probe).map_or(0, |m| m.len()) != 0 {
+            assert!(
+                Instant::now() < end,
+                "{ctx}: LazyFS kept unsynced data after lazyfs::clear-cache"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// T-STORE-8: T-STORE-3 on LazyFS, with a simulated power loss after every
+/// SIGKILL. A generation reported as committed (after `Store::save`
+/// returned, so after every `fsync` of Section 8.3) must survive; the vault,
+/// backups, state file, and temporary files are checked exactly as in
+/// T-STORE-3. Runs only with a LazyFS mount (`durability`, nightly).
+#[test]
+fn t_store_8_kill_loop_with_power_loss() {
+    let Some(l) = lazyfs() else {
+        return;
+    };
+    let tmp = tempfile::tempdir_in(&l.dir).expect("tempdir on LazyFS");
+    let f = fx_in(tmp, true);
+    // The override is needed: `store` refuses FUSE mounts (Section 8.2).
+    assert_eq!(
+        create(f.paths.clone(), false).err(),
+        Some(Error::ForeignFs),
+        "a LazyFS mount reports the FUSE magic"
+    );
+    kill_loop(&f, "T-STORE-8", Some(&l));
 }
 
 // ------------------------------------------------------------ T-STORE-4
@@ -966,6 +1106,35 @@ fn state_file_damage_and_permissions_refused() {
         });
         assert_eq!(mode(&p), ok);
     }
+    // M9 (T-COV-1 found these paths unexecuted):
+    // a state file over 1 MiB is refused before it is read;
+    overwrite(&f.paths.state, &vec![b'0'; (1 << 20) + 1]);
+    with_session(&f.paths, &kek, |st, h, _, _| {
+        assert_eq!(st.freshness(h).unwrap_err(), Error::State);
+    });
+    overwrite(&f.paths.state, &good);
+    // no state directory (a vault copied from another machine): fresh, and
+    // the next save creates it;
+    let state_dir = f.paths.state.parent().unwrap().to_owned();
+    fs::remove_dir_all(&state_dir).unwrap();
+    with_session(&f.paths, &kek, |st, h, dek, body| {
+        assert_eq!(st.freshness(h).unwrap(), Freshness::Fresh);
+        write_body(&model(h.generation + 1), body);
+        let file = vault::save(dek, h, body.expose_mut()).unwrap();
+        st.save(&file).unwrap();
+        assert_eq!(st.freshness(h).unwrap(), Freshness::Fresh);
+    });
+    assert!(f.paths.state.is_file());
+    // a symlink in place of the state's lock file: the save's state update
+    // is refused (the vault itself was already replaced, Section 8.3).
+    let lock = state_dir.join("state.lock");
+    let _ = fs::remove_file(&lock);
+    symlink(f.tmp.path().join("elsewhere"), &lock).unwrap();
+    with_session(&f.paths, &kek, |st, h, dek, body| {
+        write_body(&model(h.generation + 1), body);
+        let file = vault::save(dek, h, body.expose_mut()).unwrap();
+        assert_eq!(st.save(&file), Err(Error::Kind));
+    });
 }
 
 // ------------------------------------------------------------ T-STORE-6
@@ -1155,9 +1324,13 @@ fn store_fsize_child() {
     // SAFETY: called before any other thread of this child exists; sets
     // the disposition of SIGXFSZ to "ignore", so the write fails instead.
     unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    // Only the soft limit is lowered, and it is restored afterwards: this
+    // child's coverage profile, written at exit, would otherwise be cut at
+    // 4 KiB too (M9 CI round 3: the one corrupt profile in every run).
+    let old = rustix::process::getrlimit(rustix::process::Resource::Fsize);
     let limit = rustix::process::Rlimit {
         current: Some(4096),
-        maximum: Some(4096),
+        maximum: old.maximum,
     };
     rustix::process::setrlimit(rustix::process::Resource::Fsize, limit).unwrap();
     with_session(&paths, &vaults::unhex(&kek), |st, h, dek, body| {
@@ -1167,6 +1340,7 @@ fn store_fsize_child() {
         assert_eq!(st.save(&file), Err(Error::Io));
         assert_eq!(cli::store_exit_code(&Error::Io), cli::EXIT_ENV);
     });
+    rustix::process::setrlimit(rustix::process::Resource::Fsize, old).unwrap();
 }
 
 #[test]
@@ -1205,4 +1379,43 @@ fn save_refuses_malformed_files_and_changes_nothing() {
         }
     });
     assert_eq!(snapshot(&f), before);
+}
+
+/// Every `store::Error` has a fixed, non-empty, printable message of its
+/// own; `Mode` carries its remedy and `Format` the format error's message;
+/// both I/O error types map to `Io` (M9: T-COV-1 found most `message` arms
+/// and both conversions unexecuted).
+#[test]
+fn error_messages_are_fixed_and_distinct() {
+    let fixed = [
+        Error::Path,
+        Error::NoVault,
+        Error::Exists,
+        Error::Kind,
+        Error::Owner,
+        Error::ForeignFs,
+        Error::InUse,
+        Error::State,
+        Error::Io,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in &fixed {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(
+            seen.insert(m.to_owned()),
+            "{e:?}: message shared with another variant"
+        );
+    }
+    let remedy = "group/other permissions set; run: chmod 700 '/x'";
+    assert_eq!(Error::Mode(remedy.to_owned()).message(), remedy);
+    let f = pwv::format::Error::FileLength;
+    assert_eq!(Error::Format(f).message(), f.message());
+    assert!(!seen.contains(f.message()));
+    assert_eq!(Error::from(rustix::io::Errno::IO), Error::Io);
+    assert_eq!(Error::from(std::io::Error::other("disk")), Error::Io);
+    assert!(!Error::Io.message().contains("disk"));
 }

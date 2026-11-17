@@ -159,12 +159,49 @@ mod memtest {
             maximum: Some(0),
         };
         rustix::process::setrlimit(rustix::process::Resource::Core, zero).expect("rlimit");
+        #[cfg(coverage)]
+        profile_on_segv::install();
         let mut a = arena();
         let s = a.slots().expect("slots");
         drop(s);
         a.probe_guard(dir == "over");
         // Unreachable if the guard page works.
         std::process::exit(0);
+    }
+
+    /// Coverage builds only (`cargo llvm-cov` sets `cfg(coverage)`): a
+    /// process killed by SIGSEGV writes no profile, so the probe's `unsafe`
+    /// block (`sys.rs`, T-COV-3) would never count as run. This one-shot
+    /// handler writes the profile and returns; `SA_RESETHAND` has restored
+    /// the default action, so the faulting write runs again and the child
+    /// still dies by SIGSEGV, which is what `assert_segv` checks. The
+    /// counters are incremented on entry to each region, before the write.
+    #[cfg(coverage)]
+    mod profile_on_segv {
+        unsafe extern "C" {
+            fn __llvm_profile_write_file() -> libc::c_int;
+        }
+
+        extern "C" fn dump(_: libc::c_int) {
+            // SAFETY: the profiler runtime is linked into every coverage
+            // build. Not async-signal-safe in general, but the fault comes
+            // from the probe's own write, not from inside libc or the
+            // allocator, and the process dies straight afterwards.
+            let _ = unsafe { __llvm_profile_write_file() };
+        }
+
+        pub fn install() {
+            // SAFETY: a zeroed `sigaction` is a valid value; `dump` has the
+            // `sa_handler` signature; the old action is not needed.
+            let rc = unsafe {
+                let mut sa: libc::sigaction = core::mem::zeroed();
+                sa.sa_sigaction = dump as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                sa.sa_flags = libc::SA_RESETHAND;
+                libc::sigemptyset(&raw mut sa.sa_mask);
+                libc::sigaction(libc::SIGSEGV, &raw const sa, core::ptr::null_mut())
+            };
+            assert_eq!(rc, 0, "sigaction");
+        }
     }
 
     fn assert_segv(dir: &str) {
@@ -243,5 +280,33 @@ fn wipe_zeroes_exactly_the_slice_at_every_alignment() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn error_messages_are_fixed_and_distinct() {
+    let sys_errors = [
+        pwv::sys::Error::CoreLimit,
+        pwv::sys::Error::Dumpable,
+        pwv::sys::Error::NotATty,
+        pwv::sys::Error::Map,
+        pwv::sys::Error::Advise,
+        pwv::sys::Error::Lock,
+        pwv::sys::Error::Signal,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in [Error::Size, Error::Lock, Error::Capacity] {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+    for e in sys_errors {
+        // `Map` passes the system error's own message through unchanged.
+        assert_eq!(Error::Map(e).message(), e.message());
+        assert!(!e.message().is_empty(), "{e:?}");
+        assert!(seen.insert(e.message()), "{e:?}: message shared");
     }
 }

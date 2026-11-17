@@ -1435,6 +1435,32 @@ fn error_messages_are_fixed_and_content_free() {
             assert!(!msg.contains(secret), "{e:?}");
         }
     }
+    // Every variant (M9: T-COV-1 found the `Generation` arm unexecuted):
+    // distinct fixed messages; `Format`, `Invalid` and `Crypto` pass the
+    // inner error's message through unchanged.
+    let own = [
+        E::Capacity,
+        E::Generation,
+        E::EntryExists,
+        E::FieldExists,
+        E::NoEntry,
+        E::NoField,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in own {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+    for f in [F::Version, F::NameControl(3)] {
+        assert_eq!(E::Format(f).message(), f.message());
+        assert_eq!(E::Invalid(f).message(), f.message());
+    }
+    let c = crypto::Error::Auth;
+    assert_eq!(E::Crypto(c).message(), c.message());
 }
 
 // ------------------------------------------------------------ import

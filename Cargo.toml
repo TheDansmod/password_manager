@@ -46,6 +46,11 @@ memtest = []
 # Test-only (Section 6.4). Never enabled in release artefacts (T-ENG-7).
 testkdf = []
 
+# `cfg(coverage)` is set by `cargo llvm-cov` (spec 14.13); only the T-MEM-2
+# probe child uses it (tests/secmem.rs), to write its profile before SIGSEGV.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -1,0 +1,83 @@
+# T-MUT-1 (spec 14.11, 15.3: "weekly, and before release"): cargo-mutants on
+# `format`, `crypto`, `gen`, `store`, `vault`. M9 (owner decision 6,
+# 2026-11-16): one job per module and shard; a fast first pass against the
+# module's own tests, then every survivor re-run against the full suite
+# (default features, then memtest,testkdf) before it counts
+# (scripts/mutants.sh). Survivors must be justified in DESIGN_NOTES.md
+# (scripts/mutants_check.py). A release tag needs a green run of this
+# workflow first (README, "Releasing"); "Run workflow" starts one by hand.
+# Kept apart from ci.yml so its weekly schedule cannot trigger the nightly
+# jobs. Shards are sized from a local trial (about 40 s per mutant for
+# `crypto` on 16 cores, 2026-11-17); provisional cap 350 until measured.
+name: mutants
+
+on:
+  schedule:
+    - cron: "23 1 * * 6" # weekly, Saturday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  LAZYFS_REF: ""
+
+jobs:
+  mutants:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { module: format, shard: "0/3" }
+          - { module: format, shard: "1/3" }
+          - { module: format, shard: "2/3" }
+          - { module: crypto, shard: "0/1" }
+          - { module: gen, shard: "0/2" }
+          - { module: gen, shard: "1/2" }
+          - { module: store, shard: "0/3" }
+          - { module: store, shard: "1/3" }
+          - { module: store, shard: "2/3" }
+          - { module: vault, shard: "0/4" }
+          - { module: vault, shard: "1/4" }
+          - { module: vault, shard: "2/4" }
+          - { module: vault, shard: "3/4" }
+    name: mutants (${{ matrix.module }} ${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain and cargo-mutants
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo install --locked cargo-mutants --version "$CARGO_MUTANTS_VERSION"
+          cargo mutants --version
+      # The `fsync` mutants of `store` can only be killed by a power loss:
+      # T-STORE-8 (LazyFS) runs in the full-suite passes of the store jobs.
+      - name: LazyFS (store only)
+        if: ${{ matrix.module == 'store' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev cmake g++
+          grep -q '^user_allow_other' /etc/fuse.conf || echo user_allow_other | sudo tee -a /etc/fuse.conf
+          sh scripts/lazyfs.sh "$RUNNER_TEMP/lazyfs"
+      - name: T-MUT-1 ${{ matrix.module }} shard ${{ matrix.shard }}
+        run: sh scripts/mutants.sh ${{ matrix.module }} ${{ matrix.shard }} "$RUNNER_TEMP/mut"
+      - name: Survivors are justified in DESIGN_NOTES.md
+        run: python3 -I scripts/mutants_check.py DESIGN_NOTES.md "$RUNNER_TEMP/mut/survivors.txt"
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: mutants-${{ matrix.module }}-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/mut/*.txt
+            ${{ runner.temp }}/mut/*/mutants.out/*.txt
+            ${{ runner.temp }}/mut/*/mutants.out/outcomes.json
+            ${{ runner.temp }}/mut/*/mutants.out/diff/
+          retention-days: 30

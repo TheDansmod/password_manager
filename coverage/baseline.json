@@ -1,0 +1,63 @@
+{
+  "modules": {
+    "alloc.rs": {
+      "lines": 80.0,
+      "regions": 93.41
+    },
+    "cli.rs": {
+      "lines": 94.9,
+      "regions": 92.79
+    },
+    "clip.rs": {
+      "lines": 87.5,
+      "regions": 88.51
+    },
+    "crypto.rs": {
+      "lines": 100.0,
+      "regions": 96.98
+    },
+    "format.rs": {
+      "lines": 100.0,
+      "regions": 93.7
+    },
+    "gen.rs": {
+      "lines": 100.0,
+      "regions": 98.06
+    },
+    "lib.rs": {
+      "lines": 100.0,
+      "regions": 100.0
+    },
+    "main.rs": {
+      "lines": 100.0,
+      "regions": 100.0
+    },
+    "secmem.rs": {
+      "lines": 91.04,
+      "regions": 86.06
+    },
+    "store.rs": {
+      "lines": 99.04,
+      "regions": 95.18
+    },
+    "sys.rs": {
+      "lines": 90.82,
+      "regions": 89.57
+    },
+    "term.rs": {
+      "lines": 92.16,
+      "regions": 91.43
+    },
+    "vault.rs": {
+      "lines": 99.76,
+      "regions": 96.77
+    }
+  },
+  "recorded_from": [
+    "coverage-default",
+    "coverage-memtest",
+    "coverage-memtest-testkdf",
+    "coverage-no-default-features",
+    "coverage-testkdf"
+  ]
+}

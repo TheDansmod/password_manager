@@ -268,6 +268,67 @@ fn unjustified_unsafe(src: &str) -> Vec<usize> {
     bad
 }
 
+/// What an `unsafe` token introduces.
+#[derive(Debug, PartialEq, Eq)]
+enum UnsafeUse {
+    /// `unsafe { .. }`, ending on this 1-based line.
+    Block(usize),
+    /// `unsafe fn`, `unsafe impl`, `unsafe extern`, `unsafe trait`.
+    Decl,
+    /// Anything else (the T-COV-3 list would be incomplete).
+    Other,
+}
+
+/// T-COV-3 core: every `unsafe` token that T-ENG-2's scanner sees (same
+/// comment- and literal-stripped lines, same whole-word rule), with its
+/// 1-based line and what it introduces. A block's extent is found by brace
+/// matching on the stripped lines (literals are already emptied).
+fn unsafe_uses(src: &str) -> Vec<(usize, UnsafeUse)> {
+    let code = strip_code(src);
+    let mut out = Vec::new();
+    for (i, line) in code.iter().enumerate() {
+        let mut from = 0;
+        while let Some(pos) = line[from..].find("unsafe") {
+            let at = from + pos;
+            from = at + "unsafe".len();
+            let before = line[..at].chars().next_back();
+            let after = line[from..].chars().next();
+            if before.is_some_and(is_ident_char) || after.is_some_and(is_ident_char) {
+                continue;
+            }
+            let rest = line[from..].trim_start();
+            let decl = ["fn ", "impl", "extern", "trait "];
+            if decl.iter().any(|d| rest.starts_with(d)) {
+                out.push((i + 1, UnsafeUse::Decl));
+                continue;
+            }
+            if !rest.starts_with('{') {
+                out.push((i + 1, UnsafeUse::Other));
+                continue;
+            }
+            let open = from + line[from..].find('{').expect("brace");
+            let mut depth = 0usize;
+            let mut end = None;
+            'scan: for (j, l) in code.iter().enumerate().skip(i) {
+                let start = if j == i { open } else { 0 };
+                for c in l[start..].chars() {
+                    if c == '{' {
+                        depth += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(j + 1);
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+            out.push((i + 1, end.map_or(UnsafeUse::Other, UnsafeUse::Block)));
+        }
+    }
+    out
+}
+
 /// T-ENG-3 core: returns offending lines for forbidden global state.
 fn global_state_violations(src: &str) -> Vec<(usize, String)> {
     let code = strip_code(src);
@@ -462,6 +523,39 @@ fn t_eng_syscalls_only_in_sys() {
     }
 }
 
+/// T-COV-3 (spec 14.13, M9): the `unsafe` blocks found by T-ENG-2's
+/// scanner, for the coverage report, which requires each to be fully
+/// covered natively. Every `unsafe` token must be a block or a declaration,
+/// so the list cannot silently miss a use. With `PWV_UNSAFE_BLOCKS=<path>`
+/// (the CI coverage runs) the list is written there, one
+/// `file<TAB>first line<TAB>last line` per block: source positions only.
+#[test]
+fn t_cov_3_unsafe_blocks_listed() {
+    use std::io::Write;
+    let mut list = String::new();
+    for file in SRC_FILES {
+        for (line, u) in unsafe_uses(&read_src(file)) {
+            match u {
+                UnsafeUse::Block(last) => list.push_str(&format!("{file}\t{line}\t{last}\n")),
+                UnsafeUse::Decl => {}
+                UnsafeUse::Other => {
+                    panic!("{file}:{line}: `unsafe` neither a block nor a declaration")
+                }
+            }
+        }
+    }
+    assert!(list.lines().count() >= 10, "too few unsafe blocks found");
+    if let Some(path) = std::env::var_os("PWV_UNSAFE_BLOCKS") {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .expect("PWV_UNSAFE_BLOCKS");
+        f.write_all(list.as_bytes()).expect("write list");
+    }
+}
+
 #[test]
 fn t_mem_6_every_test_crate_installs_verifying_allocator() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
@@ -511,6 +605,25 @@ fn selftest_unsafe_checker() {
     // Strings and comments do not count as uses.
     assert!(unjustified_unsafe("let s = \"unsafe\"; // unsafe\n").is_empty());
     assert!(unjustified_unsafe("/// # Safety\n/// caller ...\npub unsafe fn f() {}\n").is_empty());
+}
+
+#[test]
+fn selftest_unsafe_uses() {
+    use UnsafeUse::{Block, Decl, Other};
+    let src = "fn f() {\n    let a = unsafe { g() };\n    unsafe {\n        if x { y() }\n    }\n}\n\
+               unsafe impl T for U {}\npub unsafe fn h() {}\nlet s = \"unsafe {\"; // unsafe {\n\
+               #![allow(unsafe_code)]\nlet p = unsafe_thing;\nunsafe\n";
+    assert_eq!(
+        unsafe_uses(src),
+        vec![
+            (2, Block(2)),
+            (3, Block(5)),
+            (7, Decl),
+            (8, Decl),
+            (12, Other)
+        ]
+    );
+    assert_eq!(unsafe_uses("unsafe { a(\n'}'\n) }\n"), vec![(1, Block(3))]);
 }
 
 #[test]

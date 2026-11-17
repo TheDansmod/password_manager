@@ -7,12 +7,18 @@ and its evidence, which is one or more of
     by a line `test [path::]name ... ok` in a test log;
   - ("job", text): a CI job or step whose success is the result (a gate
     that is not a test function, such as clippy or fuzzing);
+  - ("test", file, name, job): such a test that acts only in that CI job
+    (elsewhere it returns at once, e.g. without LazyFS); its status is the
+    job's result, not a log line;
   - ("todo", text): not implemented yet (M9).
 
 Uses (standard library only):
   python3 -I scripts/test_ids.py --check            # every named test exists
   python3 -I scripts/test_ids.py --check --spec S   # and S's IDs are all here
   python3 -I scripts/test_ids.py --markdown         # table for DESIGN_NOTES
+  python3 -I scripts/test_ids.py --matrix S         # spec S's Section 13 rows,
+      # each with its verifying IDs, their tests, and the CI job that checks
+      # each test by name (exit 1 if a row names an unknown ID)
   python3 -I scripts/test_ids.py --logs a.txt ...   # pass/fail from test logs
   python3 -I scripts/test_ids.py --require T-KAT-1,T-FMT-2 --logs a.txt ...
       # gate by name: every named test of these IDs has an `ok` line in the
@@ -31,6 +37,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def t(file, *names):
     return [("test", file, n) for n in names]
+
+
+def tj(job, file, *names):
+    """Tests that act only in CI job `job` (see the module docstring)."""
+    return [("test", file, n, job) for n in names]
 
 
 # (ID, milestone, evidence). Order follows Section 14.
@@ -103,7 +114,8 @@ IDS = [
     ("T-STORE-6", "M4", t("tests/store.rs", "t_store_6_stale_temp_files_removed")),
     ("T-STORE-7", "M4", t("tests/store.rs", "t_store_7_seven_saves_keep_five_backups")
      + t("src/store.rs", "t_store_7_copy_fallback_without_hard_links")),
-    ("T-STORE-8", "M9", [("todo", "LazyFS in `durability`")]),
+    ("T-STORE-8", "M9", tj("durability", "tests/store.rs",
+                           "t_store_8_kill_loop_with_power_loss")),
     ("T-STORE-9", "M4", t("tests/store.rs", "t_store_9_read_only_sessions_do_not_write")
      + t("tests/e2e.rs", "t_store_9_read_only_commands_never_write")),
     # 14.6
@@ -187,20 +199,24 @@ IDS = [
      + [("job", "lint: clippy steps (clippy.toml bans)")]),
     ("T-ENG-5", "M1", [("job", "test: tests/secmem.rs compiles (assert_not_impl_any!)")]),
     ("T-ENG-6", "M0", [("job", "lint: T-ENG-6 LOC budget")]),
-    ("T-ENG-7", "M9", [("todo", "release artefact has no PWV_MEMTEST / PWV_TESTKDF")]),
-    ("T-SAN-1", "M9", [("todo", "ASan over the full test suite, nightly")]),
+    ("T-ENG-7", "M9", [("job", "release-check (T-ENG-7 ok; also in release.yml)")]),
+    ("T-SAN-1", "M9", [("job", "sanitizers-asan (four configurations)")]),
     ("T-SAN-2", "M2", [("job", "sanitizers (Miri matrix)")]),
-    ("T-MUT-1", "M9", [("todo", "mutants (cargo-mutants)")]),
-    ("T-COV-1", "M9", [("todo", "coverage-report")]),
-    ("T-COV-2", "M9", [("todo", "coverage-report")]),
-    ("T-COV-3", "M9", [("todo", "coverage-report")]),
-    ("T-COV-4", "M9", [("todo", "coverage-report, coverage/baseline.json")]),
-    ("T-COV-5", "M9", [("todo", "coverage-branch")]),
-    ("T-COV-6", "M9", [("todo", "fuzz-long, report-only")]),
+    ("T-MUT-1", "M9", [("job", "mutants (weekly workflow mutants.yml)")]),
+    ("T-COV-1", "M9", [("job", "coverage-report (merged coverage runs)")]),
+    ("T-COV-2", "M9", [("job", "coverage-report (merged coverage runs)")]),
+    ("T-COV-3", "M9", [("job", "coverage-report (unsafe block list)")]
+     + t("tests/eng.rs", "t_cov_3_unsafe_blocks_listed", "selftest_unsafe_uses")),
+    ("T-COV-4", "M9", [("job", "coverage-report (coverage/baseline.json)")]),
+    ("T-COV-5", "M9", [("job", "coverage-branch (nightly)"),
+                       ("job", "coverage-report (branch figures)")]),
+    ("T-COV-6", "M9", [("job", "fuzz-long (report-only)")]),
     # 14.12
     ("T-SUPPLY-1", "M0", [("job", "supply")]),
-    ("T-REPRO-1", "M9", [("todo", "release: two builds bit-identical")]),
-    ("T-PERF-1", "M9", [("todo", "unlock <= 3 s, save <= 50 ms, allocator <= 5 %")]),
+    ("T-REPRO-1", "M9", [("job", "release-check (T-REPRO-1 ok; also in release.yml)")]),
+    ("T-PERF-1", "M9", tj("perf", "tests/perf.rs", "t_perf_1_unlock_at_default_parameters",
+                          "t_perf_1_save_1000_entries_on_tmpfs",
+                          "t_perf_1_allocator_overhead")),
     ("T-MIG-1", "M8", t("tests/mig.rs",
                         "t_mig_1_legacy_fixture_imports_the_expected_model_with_its_warning",
                         "t_mig_1_key_case_collision_and_invalid_entries_are_refused",
@@ -313,46 +329,81 @@ def markdown():
         print(f"| {tid} | {ms} | {'<br>'.join(parts)} | {g} |")
 
 
-def from_logs(paths):
-    """Per ID: pass if every named test has an `ok` line, fail if any has
-    `FAILED`, else not run. Jobs and to-dos are reported as such."""
+def read_logs(paths):
     text = ""
     for p in paths:
         with open(p, encoding="utf-8", errors="replace") as f:
             text += f.read()
-    status = 0
+    return text
+
+
+def job_result(evidence, jobs):
+    """Result of the CI job an evidence text names (its first word, e.g.
+    `fuzz-smoke` in "fuzz-smoke (fuzz_header)", `lint` in "lint: clippy"),
+    from `jobs` = {job id: result}; None if unknown."""
+    name = re.split(r"[ :(]", evidence.strip(), maxsplit=1)[0]
+    return jobs.get(name)
+
+
+def verdicts(paths, jobs=None):
+    """(ID, milestone, verdict) per ID. Named tests: pass if every one has
+    an `ok` line in the logs, fail if any has `FAILED`, else not run. Jobs:
+    the job's result when `jobs` ({job id: "success"/"failure"/"skipped"/
+    ...}) knows it and the job ran; a test tied to a job takes that job's
+    result (skipped: not run); an ID with no result is "job". To-dos:
+    "to do"."""
+    text = read_logs(paths)
+    jobs = jobs or {}
+    out = []
     for tid, ms, ev in IDS:
         res = []
         for e in ev:
-            if e[0] != "test":
-                continue
-            name = re.escape(e[2])
-            if re.search(rf"^test (\S+::)?{name} \.\.\. FAILED$", text, re.M):
-                res.append("fail")
-            elif re.search(rf"^test (\S+::)?{name} \.\.\. ok$", text, re.M):
-                res.append("pass")
-            else:
-                res.append("not run")
+            if e[0] == "test" and len(e) == 4:
+                r = jobs.get(e[3])
+                res.append({"success": "pass", "failure": "fail"}.get(r, "not run"))
+            elif e[0] == "test":
+                name = re.escape(e[2])
+                if re.search(rf"^test (\S+::)?{name} \.\.\. FAILED$", text, re.M):
+                    res.append("fail")
+                elif re.search(rf"^test (\S+::)?{name} \.\.\. ok$", text, re.M):
+                    res.append("pass")
+                else:
+                    res.append("not run")
+            elif e[0] == "job":
+                # A job skipped in this run (nightly-only on a push) adds
+                # nothing if the ID also has tests, whose log lines decide;
+                # for an ID proven by jobs alone it means "not run".
+                r = job_result(e[1], jobs)
+                if r in ("success", "failure"):
+                    res.append("pass" if r == "success" else "fail")
+                elif r is not None and all(x[0] == "job" for x in ev):
+                    res.append("not run")
         kinds = {e[0] for e in ev}
         if "todo" in kinds:
             verdict = "to do"
         elif not res:
             verdict = "job"
         elif "fail" in res:
-            verdict, status = "fail", 1
+            verdict = "fail"
         elif all(r == "pass" for r in res):
             verdict = "pass"
         else:
             verdict = "not run"
+        out.append((tid, ms, verdict))
+    return out
+
+
+def from_logs(paths):
+    """Prints the verdict per ID; exit 1 if any ID failed."""
+    status = 0
+    for tid, ms, verdict in verdicts(paths):
+        status |= verdict == "fail"
         print(f"{tid}\t{ms}\t{verdict}")
     return status
 
 
 def require(ids, paths):
-    text = ""
-    for p in paths:
-        with open(p, encoding="utf-8", errors="replace") as f:
-            text += f.read()
+    text = read_logs(paths)
     table = {tid: ev for tid, _, ev in IDS}
     bad = 0
     for tid in ids:
@@ -360,7 +411,7 @@ def require(ids, paths):
             print(f"unknown ID: {tid}")
             bad += 1
             continue
-        names = [e[2] for e in table[tid] if e[0] == "test"]
+        names = [e[2] for e in table[tid] if e[0] == "test" and len(e) == 3]
         if not names:
             print(f"{tid}: no named test to require")
             bad += 1
@@ -375,7 +426,89 @@ def require(ids, paths):
     return 1 if bad else 0
 
 
+def job_blocks():
+    """{job id: its text} of .github/workflows/ci.yml (top-level jobs)."""
+    ci = read(".github/workflows/ci.yml")
+    body = ci[ci.index("\njobs:\n"):]
+    blocks, name = {}, None
+    for line in body.split("\n"):
+        m = re.match(r"^  ([a-z0-9-]+):\s*$", line)
+        if m:
+            name = m.group(1)
+            blocks[name] = ""
+        elif name:
+            blocks[name] += line + "\n"
+    return blocks
+
+
+def gating_jobs(tid, name, blocks):
+    """CI jobs whose gate-by-name steps name test `name` (of ID `tid`)."""
+    out = []
+    for job, text in blocks.items():
+        loops = " ".join(m.group(1) for m in re.finditer(r"for t in (.*?); do", text, re.S))
+        loops = {n.rsplit("::", 1)[-1] for n in loops.replace("\\", " ").split()}
+        req = {i for m in re.finditer(r"--require\s+([A-Z0-9,-]+)", text)
+               for i in m.group(1).split(",")}
+        if name in loops or tid in req:
+            out.append(job)
+    return out
+
+
+def expand(cell):
+    """Test IDs named in a Section 13 cell: `T-FMT-1–4`, `T-COV-1 – T-COV-5`,
+    `T-FUZZ-\\*` (every T-FUZZ ID), single IDs."""
+    ids = []
+    cell = cell.replace("\\*", "*")
+    for m in re.finditer(r"(T-[A-Z0-9]+-)(\d+|\*)(?:\s*[–-]\s*(?:T-[A-Z0-9]+-)?(\d+))?", cell):
+        pre, a, b = m.group(1), m.group(2), m.group(3)
+        if a == "*":
+            ids += [i for i, _, _ in IDS if i.startswith(pre)]
+        elif b:
+            ids += [f"{pre}{k}" for k in range(int(a), int(b) + 1)]
+        else:
+            ids.append(f"{pre}{a}")
+    return ids
+
+
+def matrix(spec):
+    with open(spec, encoding="utf-8") as f:
+        text = f.read()
+    sec = text[text.index("## 13. Traceability"):text.index("## 14. ")]
+    table = {tid: ev for tid, _, ev in IDS}
+    blocks = job_blocks()
+    bad = 0
+    print("| Finding | Section | Verifying IDs | Tests (CI job checking each by name) |")
+    print("| --- | --- | --- | --- |")
+    for row in sec.split("\n"):
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) != 4 or not re.match(r"^[SRBE]\d|^Generator", cells[0]):
+            continue
+        finding, _, section, tests = cells
+        ids = expand(tests)
+        parts = []
+        for tid in ids:
+            if tid not in table:
+                print(f"ERROR: {finding}: unknown ID {tid}", file=sys.stderr)
+                bad += 1
+                continue
+            for e in table[tid]:
+                if e[0] == "test":
+                    jobs = gating_jobs(tid, e[2], blocks)
+                    if len(e) == 4:
+                        jobs = jobs or [e[3]]
+                    parts.append(f"`{e[2]}` ({', '.join(jobs) or 'not gated by name'})")
+                elif e[0] == "job":
+                    parts.append(f"job: {e[1]}")
+        if not ids:
+            print(f"ERROR: {finding}: no test ID", file=sys.stderr)
+            bad += 1
+        print(f"| {finding} | {section} | {', '.join(ids)} | {'<br>'.join(parts)} |")
+    return 1 if bad else 0
+
+
 def main(argv):
+    if "--matrix" in argv:
+        return matrix(argv[argv.index("--matrix") + 1])
     if "--require" in argv:
         ids = argv[argv.index("--require") + 1].split(",")
         return require(ids, argv[argv.index("--logs") + 1:])

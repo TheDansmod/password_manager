@@ -1,6 +1,8 @@
 # pwv vault file format, version 1
 
-**Status: draft (M3).** This is spec Section 7, restated normatively, plus
+**Status: complete for format version 1 (M9, 2026-11-17; re-checked
+against the spec, and both hexdumps checked byte by byte against the
+files).** This is spec Section 7, restated normatively, plus
 the cryptographic binding of Section 6.2 (section 5 below) and annotated
 hexdumps: the header of the golden vault `tests/vectors/v1-small.pwv`
 (T-COMPAT-1) and the body of the fuzz seed
@@ -135,7 +137,8 @@ every valid model x: parse(b) = Ok(x) ⇒ serialize(x) = b, and
 parse(serialize(x)) = Ok(x). The serializer validates its own output with
 the parser and so cannot emit a non-canonical body.
 
-Size leakage: an observer learns only ⌈(12 + C) / 4096⌉.
+Size leakage: an observer learns only ⌈(12 + C) / 4096⌉, which is roughly
+the number of entries to within about 30–60.
 
 ### Annotated body (`seed-sample`)
 
