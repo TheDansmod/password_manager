@@ -26,7 +26,7 @@ before you run it:
     gh attestation verify pwv-<version>-x86_64-linux \
       --repo TheDansmod/password_manager \
       --signer-workflow TheDansmod/password_manager/.github/workflows/release-build.yml
-    sha256sum -c SHA256SUMS
+    sha256sum -c --ignore-missing SHA256SUMS
 
 The first command proves that the file was built by that workflow from this
 repository; the second, that it matches the attested checksum list.

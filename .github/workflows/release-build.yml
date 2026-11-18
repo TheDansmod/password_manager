@@ -31,6 +31,21 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      # The file names come from Cargo.toml's version, not from the tag, so
+      # a tag that disagrees would attest files under the wrong version
+      # (owner, 2026-11-18). Only tag builds are checked; nothing else
+      # calls this workflow, and ci.yml's `release-check` never runs it.
+      - name: Tag matches Cargo.toml's version
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ] || [ "$TAG" != "v$version" ]; then
+            echo "::error::tag '$TAG' does not match Cargo.toml's version '$version' (expected tag 'v$version')"
+            exit 1
+          fi
+          echo "tag $TAG matches version $version"
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: T-REPRO-1, T-ENG-7, hardening; binary, licence, SHA256SUMS

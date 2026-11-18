@@ -5,7 +5,7 @@
 # (default features, then memtest,testkdf) before it counts
 # (scripts/mutants.sh). Survivors must be justified in DESIGN_NOTES.md
 # (scripts/mutants_check.py). A release tag needs a green run of this
-# workflow first (README, "Releasing"); "Run workflow" starts one by hand.
+# workflow first (DEVELOPMENT.md, "Releasing"); "Run workflow" starts one by hand.
 # Kept apart from ci.yml so its weekly schedule cannot trigger the nightly
 # jobs. Shards are sized from a local trial (about 40 s per mutant for
 # `crypto` on 16 cores, 2026-11-17); provisional cap 350 until measured.

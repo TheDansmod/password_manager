@@ -58,9 +58,12 @@ fast_args=""
 for t in $tests; do
   fast_args="$fast_args --cargo-test-arg=$t"
 done
+# cargo-mutants appends what follows its `--` to `cargo test`'s own
+# arguments, so the test binaries' `--skip` needs a second `--` (the first
+# mutants run failed with "cargo test: unexpected argument '--skip'").
 # shellcheck disable=SC2086
 run $common --shard "$shard" --cargo-test-arg=--lib $fast_args -o "$out/fast" \
-  -- --skip t_store_3_kill_loop --skip t_store_8_kill_loop_with_power_loss
+  -- -- --skip t_store_3_kill_loop --skip t_store_8_kill_loop_with_power_loss
 survivors "$out/fast" > "$out/fast-survivors.txt"
 echo "pass 1: $(wc -l < "$out/fast-survivors.txt") survivors"
 

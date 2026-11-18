@@ -29,10 +29,16 @@ Usage:
   coverage_report.py --runs DIR [--branch-runs DIR] [--baseline FILE]
       [--notes DESIGN_NOTES.md] [--logs FILE...] [--jobs needs.json]
       [--summary OUT.md] [--merged-lcov OUT] [--new-baseline OUT.json]
-      [--badges DIR]
+      [--badges DIR] [--mutants FILE]
   coverage_report.py --self-test
+
+--mutants FILE: the latest completed run of the weekly workflow mutants.yml
+on `main` (a JSON object with `conclusion`, `head_sha`, `updated_at`,
+`html_url`, as the GitHub API returns it; `{}` if there is none). T-MUT-1
+lives in that workflow, so this is how the report learns its result.
 """
 
+import datetime
 import json
 import os
 import re
@@ -50,6 +56,7 @@ LINE_MIN_GATED = 95.0
 LINE_MIN_OVERALL = 85.0
 TOLERANCE_PP = 0.5  # T-COV-4
 CODE_REGION = 0  # LLVM region kind: CodeRegion
+MUTANTS_MAX_AGE_DAYS = 8  # T-MUT-1 is weekly; an older run counts as not run
 
 
 # ----------------------------------------------------------------- inputs
@@ -321,6 +328,34 @@ def own_cov_verdict(tid, verdict, fails, branches_measured):
     return "fail" if m.group(1) in named else verdict
 
 
+def mutants_result(path, now):
+    """(job result for `mutants`, note) from the latest completed mutants.yml
+    run (see --mutants). "success"/"failure" from a run that finished at
+    most MUTANTS_MAX_AGE_DAYS before `now`; "skipped" (T-MUT-1: not run) if
+    there is no such run, it was cancelled, or it is older."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return "skipped", "T-MUT-1: the latest mutants.yml run could not be read"
+    concl = d.get("conclusion") if isinstance(d, dict) else None
+    if not concl:
+        return "skipped", "T-MUT-1: no completed mutants.yml run on `main`"
+    when = d.get("updated_at") or d.get("created_at") or ""
+    sha = (d.get("head_sha") or "")[:12]
+    about = f"mutants.yml run {d.get('html_url', '?')} (commit `{sha}`, finished {when}): {concl}"
+    try:
+        done = datetime.datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return "skipped", f"T-MUT-1: not counted, no finishing time; {about}"
+    if (now - done).total_seconds() > MUTANTS_MAX_AGE_DAYS * 86400:
+        return "skipped", (f"T-MUT-1: not counted, older than {MUTANTS_MAX_AGE_DAYS} days; "
+                           f"{about}")
+    result = {"success": "success", "failure": "failure"}.get(concl, "skipped")
+    return result, f"T-MUT-1 from {about}"
+
+
 def badge(label, value, color):
     """A flat SVG badge (no third-party service; spec 14.13)."""
     def width(s):
@@ -482,10 +517,16 @@ def report(args):
     # time: a failure of one gate must not mark the others failed (M9 CI
     # round 3 showed T-COV-5 "fail" on a push, where it is not measured).
     jobs["coverage-report"] = "success"
+    mut_note = None
+    if args.get("mutants"):
+        jobs["mutants"], mut_note = mutants_result(
+            args["mutants"], datetime.datetime.now(datetime.timezone.utc))
     rows = [(tid, ms, own_cov_verdict(tid, v, fails, bool(branch_runs.names)))
             for tid, ms, v in test_ids.verdicts(list(args.get("logs", [])) + runs.logs, jobs)]
     passing = sum(1 for r in rows if r[2] == "pass")
     out.append(f"### Section 14 test IDs ({passing} of {len(rows)} passing)\n")
+    if mut_note:
+        out.append(mut_note + "\n")
     out.append("| ID | Milestone | Status |")
     out.append("| --- | --- | --- |")
     for tid, ms, v in rows:
@@ -593,6 +634,26 @@ def self_test():
     assert own_cov_verdict("T-COV-5", "pass", ["T-COV-5: x"], True) == "fail"
     assert own_cov_verdict("T-COV-6", "not run", fails, False) == "not run"
     assert own_cov_verdict("T-FMT-1", "pass", fails, False) == "pass"
+    # T-MUT-1 from the latest mutants.yml run.
+    now = datetime.datetime(2026, 11, 28, 12, tzinfo=datetime.timezone.utc)
+    run = {"conclusion": "success", "head_sha": "a" * 40, "html_url": "u",
+           "updated_at": "2026-11-21T07:00:00Z"}
+    verdict = {r[0]: r[2] for r in test_ids.verdicts([], {})}
+    assert verdict["T-MUT-1"] == "job", verdict["T-MUT-1"]
+    with tempfile.TemporaryDirectory() as t:
+        p = os.path.join(t, "m.json")
+        for d, want in [(run, "success"), (dict(run, conclusion="failure"), "failure"),
+                        (dict(run, conclusion="cancelled"), "skipped"),
+                        (dict(run, updated_at="2026-11-19T07:00:00Z"), "skipped"),
+                        ({}, "skipped")]:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+            got, _ = mutants_result(p, now)
+            assert got == want, (d, got)
+            verdict = {r[0]: r[2] for r in test_ids.verdicts([], {"mutants": got})}
+            assert verdict["T-MUT-1"] == {"success": "pass", "failure": "fail"}.get(
+                got, "not run"), (got, verdict["T-MUT-1"])
+        assert mutants_result(os.path.join(t, "missing.json"), now)[0] == "skipped"
     print("coverage_report self-test ok")
 
 
@@ -604,7 +665,7 @@ def main(argv):
     flags = {"--runs": "runs", "--branch-runs": "branch_runs", "--baseline": "baseline",
              "--notes": "notes", "--logs": "logs", "--jobs": "jobs", "--summary": "summary",
              "--merged-lcov": "merged_lcov", "--new-baseline": "new_baseline",
-             "--badges": "badges"}
+             "--badges": "badges", "--mutants": "mutants"}
     for a in argv:
         if a in flags:
             key = flags[a]
