@@ -538,6 +538,16 @@ fn weak_master_passwords_are_refused() {
         "iloveyouiloveyou",           // repeated phrase
         "correct horse battery",      // three list words
         "summer-winter-spring",       // three list words
+        // Review finding R-05: column and diagonal keyboard walks, leet
+        // spellings, years, common roots, and four words with spaces.
+        "1qaz2wsx3edc4rfv",
+        "!QAZ2wsx#EDC4rfv",
+        "zaq12wsxcde34rfv",
+        "1q2w3e4r5t6y7u8i",
+        "P@ssw0rd2024!!!!",
+        "ILoveYou2024Forever",
+        "correct horse battery staple",
+        "Correct-Horse-Battery-Staple",
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ];
     for pw in weak {
@@ -564,6 +574,8 @@ fn strong_master_passwords_are_accepted() {
         "Vk7#qunmp2!xbrw9Tz",
         "mZ4$tqLp9@wXc2&nRb7!",
         "correct horse battery staple zebra",
+        "correct#horse#battery#staple",
+        "qunmpxbrwkzjvhty",
         "\u{3b1}\u{3b2}9K#m\u{3b8}zQ7!x\u{3c9}Lp2&r",
     ];
     for pw in strong {
@@ -608,9 +620,24 @@ fn strength_estimate_details() {
         "row ends do not join"
     );
     assert!(close(strength_bits("kx"), 2.0 * 26f64.log2()));
-    // A pair seen before is predictable the second time.
+    // Keyboard columns and diagonals (the touching keys of the next row),
+    // shifted digits included; keys that do not touch are not neighbours.
+    for walk in ["qa", "az", "aq", "1q", "q2", "2q", "!q", "ed", "dc", "l;"] {
+        assert!(
+            close(strength_bits(walk), strength_bits(&walk[..1]) + 1.0),
+            "{walk}"
+        );
+    }
+    for apart in ["qz", "q3", "1a", "pa", "0q"] {
+        assert!(
+            strength_bits(apart) > strength_bits(&apart[..1]) + 3.0,
+            "{apart}"
+        );
+    }
+    // A pair seen before is predictable the second time (`m` would touch
+    // `k`; `b` does not).
     assert!(close(
-        strength_bits("kxmkx"),
+        strength_bits("kxbkx"),
         3.0 * 26f64.log2() + 26f64.log2() + 1.0
     ));
     // A list word counts 11 bits, in any letter case; a repeat counts 1.
@@ -625,6 +652,28 @@ fn strength_estimate_details() {
         strength_bits(&format!("{word}#{word}")),
         12.0 + 33f64.log2()
     ));
+    // Leet spellings of a list word and the common roots count as words.
+    assert!(close(strength_bits("P@ssw0rd"), 11.0));
+    assert!(close(strength_bits("1LoveYou"), 11.0));
+    assert!(close(strength_bits("letmein"), 11.0));
+    // A year 1900–2099 counts log2(200) bits; other 4-digit runs do not.
+    assert!(close(strength_bits("1987"), 7.64));
+    assert!(close(strength_bits("2031"), 7.64));
+    assert!(close(strength_bits("1835"), 4.0 * 10f64.log2()));
+    assert!(close(strength_bits("2850"), 4.0 * 10f64.log2()));
+    // A common separator after a word: 2 bits; repeated: 0; another
+    // punctuation character costs its class.
+    assert!(close(strength_bits(&format!("{word} ")), 13.0));
+    let two = format!("{word}-correct-");
+    assert!(close(strength_bits(&two), 24.0), "{}", strength_bits(&two));
+    assert!(close(
+        strength_bits(&format!("{word}#")),
+        11.0 + 33f64.log2()
+    ));
+    assert!(
+        close(strength_bits(" ."), 2.0 * 33f64.log2()),
+        "only after a word"
+    );
     // The estimate never exceeds the uniform bound for the characters.
     let mut runner = TestRunner::new(cases(300, 4));
     runner

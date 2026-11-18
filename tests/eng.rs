@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[global_allocator]
 static GLOBAL: pwv::alloc::ZeroizingAlloc = pwv::alloc::ZeroizingAlloc::new(true);
@@ -506,6 +506,52 @@ fn t_eng_4_ban_exemptions_scoped() {
     }
 }
 
+/// T-ENG-4, second half (review finding R-06): the `sys` file primitives,
+/// which `clippy.toml`'s bans on std cannot see, are called only by
+/// `store` (S1: no file-write path outside `store`). `sys` defines them.
+#[test]
+fn t_eng_4_file_primitives_only_in_store() {
+    const PRIMITIVES: [&str; 5] = ["open_at", "rename_at", "link_at", "unlink_at", "CreateNew"];
+    for file in SRC_FILES {
+        let code = strip_code(&read_src(file));
+        let used: Vec<&str> = PRIMITIVES
+            .into_iter()
+            .filter(|w| code.iter().any(|l| has_word(l, w)))
+            .collect();
+        match *file {
+            "sys.rs" => {}
+            // Positive control: the scan does see `store`'s calls.
+            "store.rs" => assert_eq!(used, PRIMITIVES, "store.rs"),
+            _ => assert!(used.is_empty(), "{file}: calls {used:?} outside store"),
+        }
+    }
+}
+
+/// Review finding R-01: the documents that code, scripts, and CI cite as
+/// authoritative exist, with the sections the gates read (coverage
+/// exceptions, surviving mutants) and the rule-5 exception list.
+#[test]
+fn cited_documents_exist() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let notes = fs::read_to_string(root.join("docs/DESIGN_NOTES.md")).expect("DESIGN_NOTES");
+    for section in ["Coverage exceptions", "Surviving mutants", "Heap copies"] {
+        assert!(
+            notes.contains(&format!(" {section}")),
+            "DESIGN_NOTES: {section}"
+        );
+    }
+    for doc in [
+        "docs/FORMAT.md",
+        "docs/THREAT_MODEL.md",
+        "docs/SPECIFICATION.md",
+        "docs/DEVELOPMENT.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+    ] {
+        assert!(root.join(doc).is_file(), "{doc} is missing");
+    }
+}
+
 #[test]
 fn t_eng_syscalls_only_in_sys() {
     // Section 4: `sys` is the only module that names `rustix` or `libc`.
@@ -530,6 +576,10 @@ fn t_eng_syscalls_only_in_sys() {
 /// (the CI coverage runs) the list is written there, one
 /// `file<TAB>first line<TAB>last line` per block: source positions only.
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn t_cov_3_unsafe_blocks_listed() {
     use std::io::Write;
     let mut list = String::new();

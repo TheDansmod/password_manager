@@ -226,6 +226,25 @@ fn check(
     Ok(i)
 }
 
+/// Creates `dir` and its missing ancestors (mode 0700), then `fsync`s the
+/// parent of each directory created, deepest first, so that the new names
+/// are as durable as the files later saved in them (Section 8.3, G5).
+/// Returns the parents synced. A parent is opened following symlinks: it
+/// is an existing directory of the user, never the vault directory.
+fn create_dirs(dir: &Path) -> Result<Vec<&Path>, Error> {
+    let parents: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(d).is_err())
+        .map(|d| d.parent().filter(|p| !p.as_os_str().is_empty()))
+        .map(|p| p.unwrap_or(Path::new(".")))
+        .collect();
+    DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    for p in &parents {
+        File::open(p)?.sync_all()?;
+    }
+    Ok(parents)
+}
+
 /// Opens and checks the directory of `path`, creating it (mode 0700) first
 /// if `create`. The filesystem is checked first: on a foreign filesystem
 /// owner and mode are synthetic, so their errors would mislead. Returns
@@ -238,10 +257,7 @@ fn open_parent(
 ) -> Result<(OwnedFd, PathBuf, OsString), Error> {
     let (dir_path, name) = split(path)?;
     if create {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir_path)?;
+        create_dirs(&dir_path)?;
     }
     let dir = sys::open_dir(&dir_path).map_err(found)?;
     if !foreign && is_foreign_fs(sys::fs_magic(dir.as_fd())?) {
@@ -404,6 +420,23 @@ impl Store {
 
     fn backup(&self, i: u8) -> OsString {
         named(&[self.name.as_bytes(), b".", &[b'0' + i]])
+    }
+
+    /// Deletes the backups `.1` to `.5`, then `fsync`s the directory
+    /// (`passwd --purge-backups`: after a password change they still open
+    /// with the old password; review finding R-11).
+    ///
+    /// # Errors
+    /// Any I/O [`Error`]; backups already missing are not an error.
+    pub fn purge_backups(&self) -> Result<(), Error> {
+        let dir = self.dir.as_fd();
+        for i in 1..=BACKUPS {
+            match sys::unlink_at(dir, &self.backup(i)) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(sys::fsync(dir)?)
     }
 
     /// Saves `file` (Section 8.3): rotates the backups, links the current
@@ -629,6 +662,30 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect()
+    }
+
+    /// Review finding R-04: the parent of every directory `create_dirs`
+    /// makes is synced, deepest first, and nothing else.
+    #[test]
+    fn create_dirs_syncs_the_parent_of_each_new_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let deep = t.join("a/b/c");
+        let (ab, a) = (t.join("a/b"), t.join("a"));
+        assert_eq!(create_dirs(&deep).unwrap(), [ab.as_path(), &a, t]);
+        for d in [&deep, &ab, &a] {
+            assert_eq!(fs::metadata(d).unwrap().mode() & 0o777, 0o700);
+        }
+        assert_eq!(create_dirs(&deep).unwrap(), Vec::<&Path>::new());
+        assert_eq!(create_dirs(&deep.join("d")).unwrap(), [deep.as_path()]);
+        // A relative path: the parent of a new top-level directory is `.`.
+        let rel = format!(".pwv-create-dirs-{}", std::process::id());
+        let made = create_dirs(Path::new(&rel).join("x").as_path()).map(|v| v.len());
+        let top = format!("{rel}-y");
+        let synced_dot = create_dirs(Path::new(&top)).unwrap();
+        let _ = (fs::remove_dir_all(&rel), fs::remove_dir(&top));
+        assert_eq!(made.unwrap(), 2);
+        assert_eq!(synced_dot, [Path::new(".")]);
     }
 
     /// The fault points of one save, in order.

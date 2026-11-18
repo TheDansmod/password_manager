@@ -420,4 +420,25 @@ mod x11 {
         assert_eq!(p.exit_code(), Some(0));
         assert!(clipboard_empty(), "SIGTERM left the value on the clipboard");
     }
+
+    /// Review finding R-08: a panic unwinds through the session, whose
+    /// `Drop` clears the clipboard; the exit code is 5.
+    #[cfg(feature = "memtest")]
+    #[test]
+    fn panic_exit_clears_the_clipboard() {
+        if !display() {
+            return;
+        }
+        let _x = turn();
+        let home = seeded();
+        let mut p = open(&home, &["--clip-timeout", "300"]);
+        p.send("copy site\n");
+        assert!(p.expect("Copied. Clearing in 300 s."));
+        assert!(p.expect(PROMPT));
+        assert!(clipboard_is(SECRET));
+        p.send("__panic\n");
+        assert!(p.expect("internal error"));
+        assert_eq!(p.exit_code(), Some(5));
+        assert!(clipboard_empty(), "a panic left the value on the clipboard");
+    }
 }

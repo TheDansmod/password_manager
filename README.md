@@ -155,7 +155,7 @@ automatically when its key is one of `password`, `passphrase`, `pin`,
 | `mvfield <name> <old> <new>` | Rename a field |
 | `rm <name>` | Delete an entry (you type its name to confirm) |
 | `gen [options]` | Generate a password or passphrase and copy it, without storing it |
-| `passwd [--kdf-memory MiB] [--kdf-time t]` | Change the master password (re-encrypts everything with new keys) |
+| `passwd [--kdf-memory MiB] [--kdf-time t] [--purge-backups]` | Change the master password (re-encrypts everything with new keys); `--purge-backups` also deletes the backups, which the old password still opens |
 | `import --from-stdin [--on-conflict abort\|suffix]` | Add entries from a pipe (see [Importing](#importing)) |
 | `doctor` | Check the system's security settings |
 | `help` | List the commands |
@@ -207,9 +207,13 @@ Klipper) keep the copy out of their history; others may not, which
 
 `init` and `passwd` offer a generated six-word passphrase. If you choose
 your own instead, it must have at least 16 characters and resist an
-estimated 10^14 guesses (pwv penalises repeats, sequences, keyboard rows
-and dictionary words), and you type it twice. `--accept-weak-password`,
-followed by a typed confirmation, overrides the check.
+estimated 10^14 guesses (pwv penalises repeats, sequences, keyboard walks
+along rows, columns and diagonals, dictionary words also in "leet"
+spelling such as `P@ssw0rd`, years, and common separators between words),
+and you type it twice. `--accept-weak-password`, followed by a typed
+confirmation, overrides the check. The estimate is a heuristic: it catches
+common patterns, not every weak password, which is why the generated
+passphrase is the default.
 
 Opening the vault deliberately takes a noticeable moment (about 0.3 s on
 a modern machine): the key is derived with Argon2id using 256 MiB of
@@ -248,11 +252,19 @@ copy a backup over `vault.pwv`. If the copy is older than the last version
 this machine saw, pwv warns that the vault may have been rolled back and
 asks you to type `yes` before opening it.
 
+After `passwd`, the backups still open with the **old** password until
+five more saves have replaced them. If you change the password because
+the old one may be known, use `passwd --purge-backups`, which deletes
+them once the vault is saved under the new password (copies you made
+elsewhere are not affected).
+
 ### Importing
 
 `pwv import --from-stdin` adds entries read from a pipe, in pwv's own
 plain-text body format (documented in [`docs/FORMAT.md`](docs/FORMAT.md), Section 3),
-for example from a script that converts another manager's data:
+for example from a script that converts another manager's data. Standard
+input must be a pipe; a terminal or a regular file is refused, so the
+plain text never has to be written to disk:
 
 ```sh
 my-converter | pwv import --from-stdin

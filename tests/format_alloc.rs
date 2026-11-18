@@ -98,6 +98,10 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, usize) {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn t_fmt_4_hostile_headers_rejected_before_large_allocation() {
     // The counter works: a large allocation while armed is seen.
     let (v, big) = measured(|| vec![0u8; 2 * LIMIT]);

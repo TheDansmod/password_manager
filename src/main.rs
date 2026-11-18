@@ -18,7 +18,11 @@ static GLOBAL: pwv::alloc::ZeroizingAlloc = pwv::alloc::ZeroizingAlloc::new(fals
 
 fn main() {
     let code = match pwv::sys::harden() {
-        Ok(hardening) => pwv::cli::run(&hardening),
+        // A panic unwinds through `run`, so every `Drop` (arena wipe,
+        // clipboard clear, terminal restore) runs; then exit code 5
+        // (Section 9.3). The hook has already written "internal error".
+        Ok(hardening) => std::panic::catch_unwind(|| pwv::cli::run(&hardening))
+            .unwrap_or(pwv::cli::EXIT_INTERNAL),
         Err(e) => {
             pwv::sys::write_stderr(b"pwv: ");
             pwv::sys::write_stderr(e.message().as_bytes());

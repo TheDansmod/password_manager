@@ -3442,3 +3442,49 @@ documentation files moved to `docs/`.
   (PyYAML 6.0.2), `sh -n` on the changed scripts.
 - Earlier entries in this file name files at their old top-level paths;
   they describe the repository as it was then.
+
+## 2026-11-18 — M9 independent review (rule 12): findings and fixes
+
+The rule-12 review (a separate session on an exported tree without
+history or this file, decision 8 of 2026-11-16) reported 15 findings
+(`REVIEW_FINDINGS.md`, outside the repository): no Critical or High, one
+Medium, seven Low, seven Info. Its archive fingerprint matches this tree
+with `docs/DESIGN_NOTES.md` excluded, so it reviewed exactly this code.
+Each finding was checked against the code; 14 were fixed, R-01 was not a
+defect of the repository. Owner's request (2026-11-18): fix all valid
+findings.
+
+| ID | Verdict | Change |
+| --- | --- | --- |
+| R-01 Medium, DESIGN_NOTES missing | Not valid for the repository: the file was withheld from the reviewer by design. The rule-5 exceptions are under M7 "Heap copies". | Hardening only: new `tests/eng.rs` `cited_documents_exist` (the cited documents and the sections the gates read exist); `coverage_report.py --notes` now fails on a missing file instead of reading "no exceptions". |
+| R-02 Low, one-shot arguments after a rollback `yes` | Valid; reproduced (`pwv show site` after `yes`: "no such entry"). | `unlock` reads the answer into `Pw2` (free after `vault::derive`), not `Input`, and clears it. T-STORE-5 (e2e) gains one-shot `show` and `mv` after `yes`; fails without the fix. |
+| R-03 Low, `import` accepts a regular file | Valid: the M7 interpretation "pipe = not a terminal" was weaker than 12.2 step 1. | `Hardening::stdin_pipe` (`fstat(0)`, `S_ISFIFO`); `import` refuses anything else **before** the master password is asked (a terminal stdin no longer costs a key derivation). T-E2E-10: a regular file is refused (fails without the fix), a terminal is refused without a password prompt (stricter than before), positive control through a pipe. |
+| R-04 Low, new directories not durable | Valid (POSIX does not order directory creation with a later child `fsync`). | `store::create_dirs`: records the missing ancestors, creates them (0700), then `fsync`s the parent of each, deepest first; parents are opened following symlinks (they are the user's directories). Unit test checks exactly which parents are synced (absolute and relative paths). Not observable by LazyFS (it drops file data, not entries). |
+| R-05 Low, strength estimate accepts known-weak passwords | Valid; all seven examples reproduced (53.9 to 65.7 bits). | `cli::strength_bits`: keyboard graph with columns and diagonals (4 rows of 10 keys, shifted digits on the digit row; a key's neighbours below are the same and the previous column); leet undone before the word lookup (`4@`→a, `3`→e, `1!`→i, `0`→o, `5$`→s, `7`→t); four breach-corpus roots the word list lacks (`iloveyou`, `loveyou`, `letmein`, `trustno1`); a year 1900–2099 = log2(200) = 7.64 bits; a separator right after a word or other token: 2 bits if one of space `-` `_` `.`, 0 if it repeats the previous separator, otherwise its class. Now 18.3 to 46.0 bits for the seven; strong examples still pass (a random 16-letter lower-case string 67.8, a generated 6-word passphrase 90). The seven are in `weak_master_passwords_are_refused`; two are T-E2E-1 refusal cases. One detail case changed its example: `kxmkx` became `kxbkx`, because `m` now touches `k` diagonally; the asserted value and the rule tested (a pair seen before) are unchanged. |
+| R-06 Low, T-ENG-4 narrower than S1 | Valid as a test gap (no live use). | `clippy.toml` bans `OpenOptions::open`, `fs::copy`, `fs::rename`, `fs::hard_link` (positive control: each fires from `src/`). New `t_eng_4_file_primitives_only_in_store`: only `store` names `open_at`, `rename_at`, `link_at`, `unlink_at`, `CreateNew` (positive control: `store` must name all five; negative control: a call in `cli` fails it). Ten test functions that tamper with files got item-level allows (tests only; `t_eng_4_ban_exemptions_scoped` binds `src/`). |
+| R-07 Low, T-MEM-4 gaps | Valid. | Two new T-MEM-4 tests. `t_mem_4_passwd_add_gen_names_and_keys`: canary entry name and field key, `add` with a generated value, `passwd` to a chosen P2 and then to a generated passphrase; mid-session no master password (old or new) anywhere, names, keys, and values only in the arena; after `lock` nothing. `t_mem_4_init_import_and_refusals_are_wiped`: `init` with the generated passphrase, `import` of a canary body (through a FIFO, so that `pwv` keeps the PTY's PID), a wrong password (exit 2), a refused rollback (exit 3), each scanned after the wipe. Controls: a heap copy of the imported body, and of the current password in `passwd`, each fail them naming canary and mapping. |
+| R-08 Low, panic skips the clipboard clear, exit 101 | Exit code: valid. Clipboard: the hand-over to a manager does not happen in practice (`clip` always sets the history hint, and arboard 3.7.0's `Drop` then skips the hand-over, `x11.rs` `ask_clipboard_manager_to_request_our_data`), but clearing was still skipped. | `impl Drop for Session` runs `expire_clip`; `main` wraps `cli::run` in `catch_unwind` → exit code 5 after every `Drop` ran. New `memtest`-only command `__panic` (Section 5.8 extended). Tests: `panic_exits_with_code_5_and_the_fixed_message` (101 without the fix), `x11::panic_exit_clears_the_clipboard` (CI, `e2e` job, new step). |
+| R-09 Info, unreadable clipboard left serving | Valid for Wayland (on X11 the owner reads its own data locally and cannot fail). Spec 11.3 step 3 said "if the read fails, still zero the slot" (no clear). | Deviation, fail closed: the clipboard is left alone only when the read shows it holds something else (other text; `ContentNotAvailable`: empty or another format; `ConversionFailure`: not UTF-8, so not ours); any other read error clears it. T-CLIP-3 (a foreign value is kept) is unaffected. Not testable here (no display); CI covers X11 only. |
+| R-10 Info, timing separates wrong password from damaged payload | Valid; measured: 1 µs against 144 µs (release, 464 KiB payload). | `open_inner`: after a failed unwrap the payload is still copied and authenticated under a fixed all-zero key (cannot match), then the unwrap's `Auth` is returned (error precedence unchanged). Measured after: 144 µs both. One-off measurement, not a CI test (timing tests flake). |
+| R-11 Info, backups survive `passwd` | Valid. Re-encrypting them is not possible in general (backups older than an earlier `passwd` use DEKs that are gone). | `passwd` prints a notice; new option `passwd --purge-backups` deletes `.1` to `.5` after the durable save and `fsync`s the directory (`Store::purge_backups`). README and THREAT_MODEL (a dated section outside the verbatim Sections 2 and 18). Tests: `purge_backups_deletes_exactly_the_backups` (store), `passwd_notice_and_purge_backups` (e2e). |
+| R-12 Info, `passwd`/unlock lifecycle | Valid. | `tidy` also clears `Kek` and `NewDek`; `passwd` checks `KdfParams::for_write` before any prompt; the 5.4 notice is printed also when the password proves wrong: `vault::unlock` is split into `vault::derive` + `open_with_kek` (its signature is kept for tests and fuzz targets), and `cli` prints the notice between them. Test: `passwd_checks_parameters_first_and_kdf_notice_on_failure` (memlock lowered to at most 4 MiB, never raised; fails without the fix). |
+| R-13 Info (A8), word lookup time ∝ index | Valid, out of scope, cheap to remove. | `gen::OFFSETS`, a `const` reference to a table of 205,690 word offsets computed by a `const fn` at compile time (a short list fails the build); lookup is O(1). A `static` would be simpler but T-ENG-3 bars statics. Compile cost about 2 s per build of the library; the binary grows by 0.8 MB. Checked that no copy reaches the stack (a passphrase generated on a 256 KiB thread stack). Under Miri the constant is evaluated lazily in the test crate, where the item's `allow(long_running_const_eval)` does not apply, so `tests/gen.rs` allows that lint crate-wide. `word_draw_first_middle_and_last_index` under Miri: 4m50 locally (13m03 before). |
+| R-14 Info, comment bound | Valid: a new field adds 1 + 64 + 1 + 2 + 4,096 = 4,164 bytes. | Comment rewritten with the exact argument: the new padded length is at most `live.len() + 2 * BLOCK` (not "below"); the code needs only "at most". |
+| R-15 Info, T-CRY-1 tolerance | Valid as a precision issue. | The sweep now accepts `Format` only when `format::split_file` itself refuses the flipped file, `Auth` only when it accepts it, counts both, and requires every payload and tag flip to be `Auth`; the full-path cases likewise. Stricter than before. |
+
+**Deviations from the owner's specification** (the owner's copy is not
+edited here; `docs/SPECIFICATION.md` is updated): 5.8 (`__panic`, and
+the exit pause of M8, listed); 6.5 (the strength rules above); 9.2
+(`passwd --purge-backups`, parameters checked first); 11.3 step 3 (clear
+when the clipboard cannot be read); 14.3 T-CRY-1 (criterion as above);
+14.9 T-MEM-4 (the added scenarios); 14.11 T-ENG-4 (the added bans and the
+`sys` primitive check). 12.2 step 1 is now implemented as written.
+
+**CI.** `e2e`: a new step runs `x11::panic_exit_clears_the_clipboard`
+(memtest, X11); the M8 gate by name lists it and the two new T-MEM-4
+tests. `scripts/test_ids.py`: T-MEM-4 and T-ENG-4 name the new tests.
+
+**LOC** (caps unchanged): `store` 409 → 429 / 450, `vault` 486 → 495 /
+500, `gen` 268 → 294 / 300, `term + clip` 279 → 285 / 350, `sys + secmem
++ alloc` 707 → 711 / 800, `cli + main` 1,633 → 1,685 / 1,700, total 4,478
+→ 4,595 / 4,800. `vault`, `gen`, and `cli + main` have little room left.

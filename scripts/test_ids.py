@@ -168,6 +168,8 @@ IDS = [
                         "t_mem_3_arena_drop_wipes_even_if_slot_drop_was_skipped")),
     ("T-MEM-4", "M8", t("tests/mem.rs", "t_mem_4_canary_scan_mid_session_and_after_lock",
                         "t_mem_4_signal_eof_and_idle_exits_are_wiped",
+                        "t_mem_4_passwd_add_gen_names_and_keys",
+                        "t_mem_4_init_import_and_refusals_are_wiped",
                         "scan_skips_guard_pages_and_nothing_else")),
     ("T-MEM-5", "M1", t("tests/harden.rs", "t_mem_5_core_limit_ptrace_mem_and_sigsegv")
      + [("job", "coredump (no coredumpctl entry)")]),
@@ -195,7 +197,8 @@ IDS = [
                         "selftest_unsafe_checker")),
     ("T-ENG-3", "M0", t("tests/eng.rs", "t_eng_3_layering", "t_eng_3_no_global_state",
                         "selftest_global_state_checker")),
-    ("T-ENG-4", "M0", t("tests/eng.rs", "t_eng_4_ban_exemptions_scoped")
+    ("T-ENG-4", "M0", t("tests/eng.rs", "t_eng_4_ban_exemptions_scoped",
+                        "t_eng_4_file_primitives_only_in_store")
      + [("job", "lint: clippy steps (clippy.toml bans)")]),
     ("T-ENG-5", "M1", [("job", "test: tests/secmem.rs compiles (assert_not_impl_any!)")]),
     ("T-ENG-6", "M0", [("job", "lint: T-ENG-6 LOC budget")]),

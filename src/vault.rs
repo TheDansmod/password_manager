@@ -186,6 +186,35 @@ pub fn save(dek: &[u8], h: &mut Header, body: &mut [u8]) -> Result<Vec<u8>, Erro
     Ok(file)
 }
 
+/// The first half of [`unlock`]: parses the header, NFC-normalises `pw`
+/// into `nfc`, and derives the KEK into `kek`, which the caller wipes
+/// after [`open_with_kek`]. Separate so that `cli` can report the
+/// [`KdfOutcome`] also when the password then proves wrong. `locked`:
+/// refuse unless the KDF memory can be locked.
+///
+/// # Errors
+/// Any format or crypto error. `pw` and `nfc` are always empty on return.
+pub fn derive(
+    file: &[u8],
+    pw: &mut SecretSlot<'_>,
+    nfc: &mut SecretSlot<'_>,
+    kek: &mut SecretSlot<'_>,
+    locked: bool,
+) -> Result<KdfOutcome, Error> {
+    let mut run = || -> Result<KdfOutcome, Error> {
+        let h = format::parse_header(file)?;
+        crypto::normalize(pw.expose(), nfc)?;
+        pw.clear();
+        let (m_kib, t) = (h.kdf_m_kib, h.kdf_t);
+        let p = KdfParams { m_kib, t };
+        Ok(crypto::derive_kek(nfc.expose(), &h.salt, p, kek, locked)?)
+    };
+    let derived = run();
+    pw.clear();
+    nfc.clear();
+    derived
+}
+
 /// Unlocks (Section 6.3 and the unlock data flow of Section 4): parses the
 /// header, NFC-normalises `pw` into `nfc`, derives the KEK, unwraps the
 /// DEK, wipes the KEK and both password slots, then decrypts and validates
@@ -204,26 +233,8 @@ pub fn unlock(
     body: &mut SecretSlot<'_>,
     require_locked: bool,
 ) -> Result<(Header, KdfOutcome), Error> {
-    let mut derive = || -> Result<KdfOutcome, Error> {
-        let h = format::parse_header(file)?;
-        crypto::normalize(pw.expose(), nfc)?;
-        pw.clear();
-        let p = KdfParams {
-            m_kib: h.kdf_m_kib,
-            t: h.kdf_t,
-        };
-        Ok(crypto::derive_kek(
-            nfc.expose(),
-            &h.salt,
-            p,
-            kek,
-            require_locked,
-        )?)
-    };
-    let derived = derive();
-    pw.clear();
-    nfc.clear();
-    let res = derived.and_then(|out| Ok((open_with_kek(file, kek.expose(), dek, body)?, out)));
+    let res = derive(file, pw, nfc, kek, require_locked)
+        .and_then(|out| Ok((open_with_kek(file, kek.expose(), dek, body)?, out)));
     kek.clear();
     sys::scrub_stack();
     res
@@ -248,6 +259,9 @@ pub fn open_with_kek(
     res
 }
 
+/// The stand-in payload key after a failed unwrap (see `open_inner`).
+const ZERO_KEY: [u8; KEY_LEN] = [0; KEY_LEN];
+
 fn open_inner(
     file: &[u8],
     kek: &[u8],
@@ -257,10 +271,19 @@ fn open_inner(
     let (h, ct, tag) = format::split_file(file)?;
     let aad = file.get(..HEADER_LEN).ok_or(format::Error::HeaderLength)?;
     let aad_w = aad.get(..AAD_W_LEN).ok_or(format::Error::HeaderLength)?;
-    crypto::unwrap_dek(kek, &h.wrap_nonce, &h.wrapped_dek, aad_w, dek)?;
-    body.set_len(ct.len()).map_err(|_| Error::Capacity)?;
-    body.expose_mut().copy_from_slice(ct);
-    crypto::open(dek.expose(), &h.payload_nonce, aad, body.expose_mut(), tag)?;
+    let unwrapped = crypto::unwrap_dek(kek, &h.wrap_nonce, &h.wrapped_dek, aad_w, dek);
+    // A wrong password still copies and authenticates the payload, under
+    // a fixed key that cannot match, so that both tag failures cost the
+    // same work (review finding R-10); the unwrap's error is returned.
+    let key = unwrapped
+        .as_ref()
+        .map_or::<&[u8], _>(&ZERO_KEY, |()| dek.expose());
+    let opened = body.set_len(ct.len()).map(|()| {
+        body.expose_mut().copy_from_slice(ct);
+        crypto::open(key, &h.payload_nonce, aad, body.expose_mut(), tag)
+    });
+    unwrapped?;
+    opened.map_err(|_| Error::Capacity)??;
     format::parse_body(body.expose())?;
     Ok(h)
 }
@@ -352,10 +375,13 @@ fn room<'s>(scratch: &'s mut SecretSlot<'_>, n: usize) -> Result<&'s mut [u8], E
 type Plan<'p, 'b> = &'p mut dyn FnMut(&mut Vec<Item<'b>>) -> Result<(usize, Edit<'b>), Error>;
 
 /// Rewrites `live` into `scratch` according to `plan`. One operation adds
-/// at most 4 + 64 + 4096 content bytes (`set`), less than a block, and
-/// `live.len()` is at least 12 + its content, so the new padded length is
-/// below `live.len() + 2 * BLOCK`: `out` is shorter only when it is the
-/// whole slot, and `Capacity` is unchanged.
+/// at most 1 + 64 + 1 + 2 + 4096 = 4,164 content bytes (`set` of a new
+/// field: key length, key, flags, value length, value), and `live.len()`
+/// is a multiple of `BLOCK` and at least 12 + its content, so the new
+/// padded length is at most `BLOCK * ceil((live.len() + 4164) / BLOCK)` =
+/// `live.len() + 2 * BLOCK` (review finding R-14 corrected the bound):
+/// `out` is shorter only when it is the whole slot, and `Capacity` is
+/// unchanged.
 fn rewrite<'b>(
     live: &'b [u8],
     scratch: &mut SecretSlot<'_>,

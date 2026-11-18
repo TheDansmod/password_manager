@@ -455,6 +455,10 @@ fn t_store_1_wrong_owner_root_directory() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn t_store_1_symlinks_and_file_types() {
     let f = fx();
     create_vault(&f.paths, 1);
@@ -804,6 +808,10 @@ impl LazyFs {
     /// `fsync`ed. A probe written without `fsync` just before must lose its
     /// data, which shows the command has taken effect (and that this mount
     /// drops unsynced data at all, so the test cannot pass vacuously).
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests tamper with files; the ban binds src/"
+    )]
     fn power_loss(&self, ctx: &str) {
         use std::io::Write;
         let probe = self.dir.join("t_store_8_probe");
@@ -953,6 +961,10 @@ fn t_store_4_second_process_refused() {
 // ------------------------------------------------------------ T-STORE-5
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn t_store_5_rollback_detected() {
     let f = fx();
     let (kek, files) = create_vault(&f.paths, 5);
@@ -1015,6 +1027,10 @@ fn t_store_5_rollback_detected() {
 }
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn t_store_5_state_never_regresses_and_tracks_vaults_separately() {
     let f = fx();
     let (kek, _) = create_vault(&f.paths, 5);
@@ -1171,6 +1187,10 @@ fn t_store_6_stale_temp_files_removed() {
 }
 
 /// Replaces the contents of the existing file `p` with `b`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn overwrite(p: &Path, b: &[u8]) {
     use std::io::Write;
     let mut o = fs::OpenOptions::new();
@@ -1179,6 +1199,10 @@ fn overwrite(p: &Path, b: &[u8]) {
 }
 
 /// Creates `p` (mode 0600) holding `b`.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests tamper with files; the ban binds src/"
+)]
 fn new_file(p: &Path, b: &[u8]) {
     use std::io::Write;
     let mut o = fs::OpenOptions::new();
@@ -1210,6 +1234,24 @@ fn t_store_7_seven_saves_keep_five_backups() {
     let (h, m) = vaults::unlock_model(&fs::read(f.at("vault.pwv.5")).unwrap(), PW.as_bytes())
         .expect("password opens backup");
     assert_eq!((h.generation, m), (2, model(2)));
+}
+
+/// Review finding R-11: `passwd --purge-backups` deletes `.1` to `.5`
+/// (they still open with the old password); the vault itself is
+/// untouched, a second purge finds nothing to do, and the next save
+/// starts a new `.1`.
+#[test]
+fn purge_backups_deletes_exactly_the_backups() {
+    let f = fx();
+    let (_, files) = create_vault(&f.paths, 7);
+    let (mut st, file) = Store::open(f.paths.clone(), false).unwrap();
+    assert_eq!(file, files[6]);
+    st.purge_backups().unwrap();
+    assert_eq!(f.names(), ["vault.pwv", "vault.pwv.lock"]);
+    assert_eq!(fs::read(&f.paths.vault).unwrap(), files[6]);
+    st.purge_backups().unwrap();
+    st.save(&files[6]).unwrap();
+    assert_eq!(f.names(), ["vault.pwv", "vault.pwv.1", "vault.pwv.lock"]);
 }
 
 // ------------------------------------------------------------ T-STORE-9

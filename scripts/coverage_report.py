@@ -227,8 +227,12 @@ def exceptions(notes_path):
     """{(file, kind): set(lines)} from DESIGN_NOTES' "Coverage exceptions"
     tables: rows `| src/x.rs:N[-M] | line|function | date | reason |`."""
     out = {}
-    if not notes_path or not os.path.isfile(notes_path):
+    if not notes_path:
         return out
+    if not os.path.isfile(notes_path):
+        # A cited document that is missing is an error, not "no exceptions"
+        # (review finding R-01).
+        sys.exit(f"--notes {notes_path}: no such file")
     with open(notes_path, encoding="utf-8") as f:
         text = f.read()
     for m in re.finditer(r"^#+ .*Coverage exceptions.*$", text, re.M):

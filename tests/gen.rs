@@ -14,6 +14,13 @@
 //! tests. T-GEN-3 (10^6 characters) and T-GEN-6 (SHA-256 of 2.2 MB) run
 //! natively only.
 
+#![allow(
+    long_running_const_eval,
+    reason = "under Miri the word list's offset table (`gen::OFFSETS`, review \
+              finding R-13) is evaluated lazily in this crate, where the allow \
+              in src/gen.rs does not reach"
+)]
+
 mod common;
 
 use common::vaults::arena;

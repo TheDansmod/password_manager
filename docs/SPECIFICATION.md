@@ -263,11 +263,13 @@ The program never `fork`s or `exec`s: no editor, no pager, no `xclip` or `wl-cop
 
 ### 5.8 Test-only introspection (cargo feature `memtest`)
 
-Verification of Invariant M (T-MEM-4) requires reading the process's memory from a test harness. The feature `memtest` therefore does three things:
+Verification of Invariant M (T-MEM-4) requires reading the process's memory from a test harness. The feature `memtest` therefore does the following:
 
 - it skips `PR_SET_DUMPABLE`, so the harness, as parent under Yama `ptrace_scope = 1`, may read `/proc/<pid>/mem`;
 - it prints the arena's address range to fd 2 at startup;
-- it adds a `__pause` REPL command that blocks until the harness signals.
+- it adds a `__pause` REPL command that blocks until the harness signals;
+- it adds a `__panic` command that panics, so that tests reach the unwinding path (clipboard cleared, exit code 5);
+- with `PWV_MEMTEST_EXIT_PAUSE` set, it pauses after the wipe, before exit, for a last scan.
 
 The feature is excluded from release builds, and CI fails if a release binary contains the marker string `PWV_MEMTEST`.
 
@@ -328,7 +330,7 @@ Here M\_dev is device memory and τ\_dev is one evaluation's latency on that dev
 
 **Policy.** `init` and `passwd` offer a generated 6-word passphrase as the default choice. That gives H = 6 log₂ 205,690 ≈ 105.9 bits.
 
-A user-chosen password must have at least 16 characters and an estimate of at least 10¹⁴ guesses. The estimate is computed by `pwv` itself, in place in the arena, so the password never reaches the heap; no strength library is used. It penalises repeated runs, sequences, keyboard rows, and words of the embedded list. Below either limit, the password is rejected, unless the user passes `--accept-weak-password` and types a confirmation sentence. A user who declines the generated passphrase is warned that a chosen password is usually weaker.
+A user-chosen password must have at least 16 characters and an estimate of at least 10¹⁴ guesses. The estimate is computed by `pwv` itself, in place in the arena, so the password never reaches the heap; no strength library is used. It penalises repeated runs, sequences, keyboard walks (rows, columns, and diagonals, shifted digits included), words of the embedded list and a few common roots it lacks (also in "leet" spelling), years 1900–2099, and common or repeated separators between words. Below either limit, the password is rejected, unless the user passes `--accept-weak-password` and types a confirmation sentence. A user who declines the generated passphrase is warned that a chosen password is usually weaker.
 
 The password must be entered twice; the two entries are compared in constant time inside the arena.
 
@@ -502,7 +504,7 @@ Read-only commands (`ls`, `show`, `reveal`, `copy`, `gen` without storing) never
 | `mvfield <name> <old> <new>` | Rename a field key | Yes | Refuses if `new` exists in the entry (B4) |
 | `rm <name>` | Delete an entry | Yes | User must type the exact entry name |
 | `gen [opts]` | Generate a password or passphrase and copy it, without storing it | No | Prints only the entropy estimate unless `--show` |
-| `passwd [--kdf-memory] [--kdf-time]` | Change the master password; rotate salt and DEK (Section 6.3) | Yes | Current password re-entered; new password twice; strength policy (E3) |
+| `passwd [--kdf-memory] [--kdf-time] [--purge-backups]` | Change the master password; rotate salt and DEK (Section 6.3) | Yes | KDF parameters checked before any prompt; current password re-entered; new password twice; strength policy (E3). The backups still open with the old password: a notice says so, and `--purge-backups` deletes them after the durable save |
 | `import --from-stdin [--on-conflict abort or suffix]` | Merge a canonical body read from the stdin pipe (Section 12) | Yes | stdin must be a pipe; the strict parser validates; default `abort` on name conflict |
 | `doctor` | Report the security posture of the environment (Section 9.4) | No | Read-only |
 | `help`, `quit` (alias `exit`, `lock`) | Help; wipe and exit | No | — |
@@ -613,7 +615,7 @@ The pinned `arboard` exposes `SetExtLinux::exclude_from_history()`. It adds the 
 
 1. The `arboard::Clipboard` object is created lazily on the first copy and reused until the copy expires. Use the `CLIPBOARD` selection only, never `PRIMARY`.
 2. **copy(v):** first validate v as UTF-8. Then call `set().exclude_from_history().text(Cow::Borrowed(v))`. Copy v into the `Clip` slot, and set deadline = now + clip timeout.
-3. **On expiry,** and on every exit path: read the clipboard text. If it equals the `Clip` slot in constant time, set the clipboard to the empty string. Then zero the `Clip` slot. If the read fails, still zero the slot. Then drop the `Clipboard` object: a value pasted by another client passed through its X11 connection's send buffer, which keeps the bytes until it is freed.
+3. **On expiry,** and on every exit path: read the clipboard text. If it equals the `Clip` slot in constant time, set the clipboard to the empty string. Then zero the `Clip` slot. If the clipboard demonstrably holds something else (other text, nothing, another format, text that is not UTF-8), leave it. If it cannot be read at all, set it to the empty string anyway (fail closed: on Wayland the value would otherwise be served until replaced). Zero the slot in every case. Then drop the `Clipboard` object: a value pasted by another client passed through its X11 connection's send buffer, which keeps the bytes until it is freed.
 4. **Ordering at exit:** clear-if-unchanged first, then drop the `Clipboard` object. On X11, `arboard` may hand the current selection to a clipboard manager when it is dropped. Clearing first guarantees that the hand-over carries nothing sensitive.
 5. **One-shot `pwv copy`** stays alive until the deadline, or until Enter is pressed. While waiting it shows `Copied. Clearing in 10 s (Enter to clear now).` The wait is required: on X11, the selection lives only as long as its owning process.
 
@@ -701,7 +703,7 @@ The test suite is the specification's enforcement mechanism. Thirteen families o
 
 | ID | Test | Pass criterion |
 | --- | --- | --- |
-| T-CRY-1 | Flip each of the 8 bits of every byte of a small golden vault (about 4.3 KiB, so about 35,000 cases; run against the post-KDF open path with the derived KEK cached, plus 100 random full-path cases) | Every case fails authentication |
+| T-CRY-1 | Flip each of the 8 bits of every byte of a small golden vault (about 4.3 KiB, so about 35,000 cases; run against the post-KDF open path with the derived KEK cached, plus 100 random full-path cases) | Every case fails authentication, except flips that the format layer itself refuses first (`format::split_file`); those are counted separately, and every payload and tag flip fails authentication |
 | T-CRY-2 | Wrong password versus a corrupted payload | Byte-identical user-visible message and the same exit code (2) |
 | T-CRY-3 | 10⁵ saves of one vault | All payload nonces distinct; wrap nonce unchanged between saves |
 | T-CRY-4 | `passwd`, then try the old password on an old file copy to decrypt the new file's payload | Fails; salt, DEK, and both nonces all differ |
@@ -773,7 +775,7 @@ The test suite is the specification's enforcement mechanism. Thirteen families o
 | T-MEM-1 | Parse `/proc/<pid>/smaps` for the arena | `Locked:` equals the data-region size; `VmFlags` contains `dd` and `wf`; both guard mappings are `---p` |
 | T-MEM-2 | A test-only command writes one byte past the last slot, in a child process | Child dies by SIGSEGV |
 | T-MEM-3 | Drop a slot, then the arena (via the `memtest` snapshot hook taken just before `munmap`) | All bytes zero |
-| T-MEM-4 | **Canary scan** (`memtest` build). The vault holds secret canary C₁; the master password is canary P; the user types C₂ in `set`, and C₃ is generated. Run `show`, `reveal`, `copy`, `set`, and `gen`, then pause; the harness reads every readable mapping via `/proc/<pid>/mem` and searches for each canary in UTF-8 and UTF-16LE. Then `lock`, which wipes, pauses before `exit`, and is scanned again | Mid-session: matches only inside the arena; P found nowhere. After lock: zero matches anywhere |
+| T-MEM-4 | **Canary scan** (`memtest` build). The vault holds secret canary C₁; the master password is canary P; the user types C₂ in `set`, and C₃ is generated. Run `show`, `reveal`, `copy`, `set`, and `gen`, then pause; the harness reads every readable mapping via `/proc/<pid>/mem` and searches for each canary in UTF-8 and UTF-16LE. Then `lock`, which wipes, pauses before `exit`, and is scanned again. Also: an entry name and field key as canaries, `add` with a generated value, `passwd` to a chosen password and to a generated passphrase (scanned mid-session); `init` with the generated passphrase, `import` of a canary body from a pipe, a wrong password, and a refused rollback (each scanned after the wipe) | Mid-session: matches only inside the arena; no master password (old or new) found anywhere. After lock or any exit: zero matches anywhere |
 | T-MEM-5 | Release build. Read `/proc/<pid>/limits`; attempt `ptrace(PTRACE_ATTACH)` and a `/proc/<pid>/mem` read from a sibling (non-parent) process; send SIGSEGV | Core limit 0; attach and read refused; no core file and no `coredumpctl` entry |
 | T-MEM-6 | In tests, the global allocator wraps an asserting layer that checks every block is zero when it reaches `System::dealloc`, across the whole test suite | Never violated |
 | T-MEM-7 | After unlock, `/proc/<pid>/maps` | KDF region no longer mapped; in `memtest`, its bytes were zero before `munmap` |
@@ -793,7 +795,7 @@ Targets: T-FUZZ-1 header parser; T-FUZZ-2 body parser; T-FUZZ-3 full open with `
 | T-ENG-1 | `cargo fmt --check`; `cargo clippy --all-targets -D warnings` with the `clippy::pedantic` subset listed in `clippy.toml` | Clean |
 | T-ENG-2 | Script: `unsafe` appears only in `sys.rs`, `secmem.rs`, `alloc.rs`; each `unsafe` block is preceded by `// SAFETY:` | Clean |
 | T-ENG-3 | Script: the `use crate::` graph respects the layering of Section 4; no `static mut`; no global state except the allocator | Clean |
-| T-ENG-4 | `clippy.toml` `disallowed-methods` and `disallowed-macros`: std stdio and print macros (except in `term`), `std::process::Command`, `rand::thread_rng`, `std::fs::write` and `File::create` outside `store` | Clean |
+| T-ENG-4 | `clippy.toml` `disallowed-methods` and `disallowed-macros`: std stdio and print macros (except in `term`), `std::process::Command`, `rand::thread_rng`, `std::fs::write`, `File::create`, `OpenOptions::open`, `fs::copy`, `fs::rename`, and `fs::hard_link` outside `store`; and only `store` calls the `sys` file primitives (`open_at`, `rename_at`, `link_at`, `unlink_at`) | Clean |
 | T-ENG-5 | `static_assertions`: `SecretSlot` and `SecureArena` are not `Clone`, `Copy`, `Display`, or `Send` | Compiles |
 | T-ENG-6 | `tokei`-based script enforces the LOC caps of Section 3 | Within caps |
 | T-ENG-7 | Release artefact contains neither `PWV_MEMTEST` nor `PWV_TESTKDF` marker strings | Absent |

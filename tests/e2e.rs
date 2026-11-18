@@ -113,7 +113,13 @@ fn stat(home: &Home) -> (u64, i64, i64, u64) {
 
 #[test]
 fn t_e2e_1_init_weak_password_refused() {
-    for weak in ["password1password1", "short-Xk7#", "qwertyuiopasdfghjkl"] {
+    for weak in [
+        "password1password1",
+        "short-Xk7#",
+        "qwertyuiopasdfghjkl",
+        "1qaz2wsx3edc4rfv",
+        "P@ssw0rd2024!!!!",
+    ] {
         let home = Home::new();
         let mut p = home.spawn(&["init", KDF[0], KDF[1]]);
         assert!(p.answer("[Y/n] ", "n"));
@@ -673,11 +679,41 @@ fn t_e2e_10_import_valid_invalid_and_tty() {
     let names: Vec<&str> = m.iter().map(|e| e.0.as_str()).collect();
     assert_eq!(names, ["mail", "site", "site (imported)"]);
     assert_eq!(m[2].1[0].2, "CANARY-e2e-imp-2");
-    // A terminal as stdin is refused, in one-shot mode and in the REPL.
+    // A terminal as stdin is refused, in one-shot mode and in the REPL;
+    // in one-shot mode before the master password is asked (review
+    // finding R-03: the refusal used to follow a full key derivation).
     let mut p = home.spawn(&["import", "--from-stdin"]);
-    assert!(p.answer("Master password: ", PW));
     assert!(p.expect("import reads a canonical body from a pipe"));
     assert_eq!(p.exit_code(), Some(1));
+    assert!(
+        !p.saw("Master password"),
+        "asked for a password for nothing"
+    );
+    let mut p = home.spawn(&["import"]);
+    assert!(p.expect("import reads a canonical body from a pipe"));
+    assert_eq!(p.exit_code(), Some(1));
+    assert!(!p.saw("Master password"));
+    // A regular file as stdin is refused too: "stdin must be a pipe"
+    // (Section 12.2 step 1), so that plaintext need never be on disk.
+    // Positive control: the same bytes through a pipe are imported below.
+    let fresh = vec![entry("filed", "CANARY-e2e-imp-3")];
+    let file = home.dir.path().join("body.bin");
+    let mut a = common::vaults::arena();
+    let mut s = a.slots().expect("slots");
+    common::vaults::write_body(&fresh, &mut s.vault_a);
+    common::pty::overwrite(&file, s.vault_a.expose());
+    let cmd = home.command(&["import", "--from-stdin"]);
+    let script = format!("exec \"$0\" \"$@\" < '{}'", file.display());
+    let mut p = Pty::spawn_shell(&script, cmd);
+    assert!(p.expect("import reads a canonical body from a pipe"));
+    assert_eq!(p.exit_code(), Some(1));
+    assert!(!p.saw("Master password"));
+    assert_eq!(model(&home, PW), m, "a regular file was imported");
+    let mut p = import(&home, &body_escapes(&fresh), &[]);
+    assert!(p.expect("Imported 1 entries"));
+    assert_eq!(p.exit_code(), Some(0));
+    let m = model(&home, PW);
+    assert_eq!(m.len(), 4);
     let mut p = open(&home);
     run(&mut p, "import --from-stdin");
     assert!(p.saw("import reads a canonical body from a pipe"));
@@ -770,6 +806,72 @@ fn t_e2e_11_passwd_then_only_the_new_password_opens() {
     assert_eq!(old_file[12..28], new_file[12..28], "vault ID kept");
 }
 
+/// Review finding R-11: after `passwd` the backups still open with the
+/// old password. Without the flag a notice says so and they stay; with
+/// `--purge-backups` they are deleted once the new vault is saved.
+#[test]
+fn passwd_notice_and_purge_backups() {
+    let home = seeded();
+    let dir = home.vault().parent().expect("dir").to_owned();
+    let backups = |dir: &std::path::Path| {
+        common::pty::listing(dir)
+            .into_iter()
+            .filter(|n| n.starts_with("vault.pwv."))
+            .filter(|n| n.as_bytes().last().is_some_and(u8::is_ascii_digit))
+            .count()
+    };
+    let change = |p: &mut Pty, from: &str, to: &str, flag: &str| {
+        p.send(&format!("passwd {flag}\n"));
+        assert!(p.answer("Current master password: ", from));
+        assert!(p.answer("[Y/n] ", "n"));
+        assert!(p.answer("New master password: ", to));
+        assert!(p.answer("Repeat: ", to));
+        assert!(p.expect("Master password changed."));
+    };
+    let mut p = open(&home);
+    change(&mut p, PW, PW2, "");
+    assert!(p.expect("still open with the old password"));
+    assert!(p.expect(PROMPT));
+    let n = backups(&dir);
+    assert!(n >= 1, "backups kept without the flag");
+    let old = std::fs::read(dir.join("vault.pwv.1")).expect(".1");
+    assert!(
+        common::vaults::unlock_model(&old, PW.as_bytes()).is_ok(),
+        "control"
+    );
+    change(&mut p, PW2, PW, "--purge-backups");
+    assert!(p.expect("Backups deleted."));
+    assert!(p.expect(PROMPT));
+    assert_eq!(backups(&dir), 0, "backups left after --purge-backups");
+    quit(p);
+    assert_eq!(model(&home, PW)[0].0, "site", "the vault itself is intact");
+}
+
+/// Review finding R-12: `passwd` checks the KDF parameters before it asks
+/// for anything or derives a key; and the Section 5.4 notice that the KDF
+/// memory was not locked is printed also when the password proves wrong.
+#[test]
+fn passwd_checks_parameters_first_and_kdf_notice_on_failure() {
+    let home = seeded();
+    let mut p = open(&home);
+    p.send("passwd --kdf-time 1\n");
+    assert!(p.expect("KDF parameters out of range"));
+    assert!(p.expect(PROMPT));
+    assert!(!p.saw("Current master password"), "asked before checking");
+    quit(p);
+    // At most 4 MiB lockable (lowered only, never raised): enough for the
+    // arena, which the harness already locks, not for the 64 MiB KDF region.
+    let notice = "the key-derivation memory could not be locked";
+    let sh = "l=$(ulimit -l); { [ \"$l\" = unlimited ] || [ \"$l\" -gt 4096 ]; } && ulimit -l 4096; \
+              exec \"$0\" \"$@\"";
+    for (pw, code) in [(PW, 0), (PW2, 2)] {
+        let mut p = Pty::spawn_shell(sh, home.command(&["ls"]));
+        assert!(p.answer("Master password: ", pw));
+        assert!(p.expect(notice), "no notice (exit code {code})");
+        assert_eq!(p.exit_code(), Some(code));
+    }
+}
+
 // ------------------------------------------------------------ T-E2E-12
 
 #[test]
@@ -859,6 +961,45 @@ fn t_store_5_rollback_warning_no_exits_3_yes_continues() {
     let h =
         pwv::format::parse_header(&std::fs::read(home.vault()).expect("vault")).expect("header");
     assert_eq!(h.generation, newest + 1, "the counter never regresses");
+    // One-shot mode (review finding R-02): the answer must not overwrite
+    // the command's arguments, so after `yes` the command still addresses
+    // `site` (it read `s`, or nothing, before the fix).
+    common::pty::overwrite(&home.vault(), &old);
+    let mut p = home.spawn(&["show", "site"]);
+    assert!(p.answer("Master password: ", PW));
+    assert!(p.answer("Type yes to continue: ", "yes"));
+    assert!(p.expect("alice"), "the one-shot command lost its argument");
+    assert_eq!(p.exit_code(), Some(0));
+    assert!(!p.saw("no such entry"));
+    let mut p = home.spawn(&["mv", "site", "renamed"]);
+    assert!(p.answer("Master password: ", PW));
+    assert!(p.answer("Type yes to continue: ", "yes"));
+    assert_eq!(p.exit_code(), Some(0));
+    let m = model(&home, PW);
+    assert_eq!(m.len(), 1);
+    assert_eq!(m[0].0, "renamed", "the rename went to the wrong entry");
+    let h =
+        pwv::format::parse_header(&std::fs::read(home.vault()).expect("vault")).expect("header");
+    assert_eq!(h.generation, newest + 2, "the counter never regresses");
+}
+
+/// Review finding R-08: a panic (reached through the `memtest` command
+/// `__panic`) unwinds, writes only the fixed message, restores the
+/// terminal, and exits with code 5 (internal error), not Rust's 101.
+#[cfg(feature = "memtest")]
+#[test]
+fn panic_exits_with_code_5_and_the_fixed_message() {
+    let home = seeded();
+    let mut p = home.spawn(&["__panic"]);
+    assert!(p.expect("internal error"));
+    assert_eq!(p.exit_code(), Some(5));
+    assert!(!p.saw("panicked"), "the panic payload was formatted");
+    let mut p = open(&home);
+    run(&mut p, "show site");
+    p.send("__panic\n");
+    assert!(p.expect("internal error"));
+    assert_eq!(p.exit_code(), Some(5));
+    assert!(!p.saw("panicked"));
 }
 
 #[test]

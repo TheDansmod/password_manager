@@ -44,3 +44,11 @@ The following exposures remain after a correct implementation. Each is outside t
 | Rollback is detected, not prevented | No trusted monotonic store | Section 19.2 |
 
 **Non-goals for v1:** Windows and macOS; a GUI or browser integration; autotype; TOTP generation; sharing or sync; plaintext export; multiple vaults per session; a recovery key or hardware keyslot. The format reserves room for a keyslot list in a future version 2 through `format_version`; v1 implements exactly one password keyslot.
+
+## Notes outside the specification (independent review, 2026-11-18)
+
+Not part of the verbatim Sections 2 and 18 above; see `DESIGN_NOTES.md`, entry "M9 independent review: findings and fixes".
+
+- **Backups after a password change (A1).** `passwd` re-encrypts the vault under a new key, but the backups `.1` to `.5` stay encrypted under the old password until five more saves replace them. `passwd` says so; `passwd --purge-backups` deletes them once the new vault is durable. Copies of the vault made elsewhere (sync history, earlier theft) cannot be recalled by any program: after a suspected leak of the master password, change the stored secrets as well.
+- **Authentication timing.** A wrong password and a damaged payload now cost the same work (the payload tag is checked in both cases), so neither the error nor the time separates them.
+- **Passphrase word lookup** takes the same time for every word index (a compile-time offset table); A8 remains out of scope.

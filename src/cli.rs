@@ -429,8 +429,26 @@ pub const MIN_PASSWORD_BITS: f64 = 46.5;
 const WORD_BITS: f64 = 11.0;
 /// Bits credited to a character that follows from what precedes it.
 const PREDICTABLE_BITS: f64 = 1.0;
-/// Keyboard rows, for adjacent-key runs.
-const KEY_ROWS: &[u8] = b"qwertyuiop\0asdfghjkl\0zxcvbnm\x001234567890";
+/// Bits credited to a year 1900–2099 (log2 of 200).
+const YEAR_BITS: f64 = 7.64;
+/// Bits credited to a common separator (space, `-`, `_`, `.`) after a word.
+const SEP_BITS: f64 = 2.0;
+/// US keyboard rows of 10 keys, each half a key right of the one above;
+/// the last is the shifted digit row. For walks along rows, columns, and
+/// diagonals.
+const KEYS: &[u8; 50] = b"1234567890qwertyuiopasdfghjkl;zxcvbnm,./!@#$%^&*()";
+/// Common letter substitutions ("leet"): each byte of the first string
+/// stands for the letter below it.
+const LEET: [&[u8; 9]; 2] = [b"4@31!05$7", b"aaeiiosst"];
+/// Breach-corpus roots that the word list lacks (letters as [`unleet`]).
+const COMMON: [&[u8]; 4] = [b"iloveyou", b"loveyou", b"letmein", b"trustnoi"];
+
+/// The letter a [`LEET`] substitute stands for, else `b` lower-cased.
+fn unleet(b: u8) -> u8 {
+    let at = LEET[0].iter().position(|l| *l == b);
+    at.and_then(|i| LEET[1].get(i).copied())
+        .unwrap_or(b.to_ascii_lowercase())
+}
 
 /// Whether `w` (ASCII, any case) is a word of the embedded list: a binary
 /// search over the sorted list's bytes, comparing in place.
@@ -447,7 +465,7 @@ fn listed(w: &[u8]) -> bool {
         let tail = list.get(start..hi).unwrap_or_default();
         let len = tail.iter().position(|&c| c == b'\n').unwrap_or(tail.len());
         let line = tail.get(..len).unwrap_or_default();
-        let probe = w.iter().map(u8::to_ascii_lowercase);
+        let probe = w.iter().map(|b| unleet(*b));
         match line.iter().copied().cmp(probe) {
             core::cmp::Ordering::Equal => return true,
             core::cmp::Ordering::Less => lo = start + len + 1,
@@ -457,26 +475,43 @@ fn listed(w: &[u8]) -> bool {
     false
 }
 
-/// Length of the longest list word (5 to 24 letters) at the start of `s`.
+/// Length of the longest list word or [`COMMON`] root (5 to 24 letters,
+/// leet substitutions undone) at the start of `s`.
 fn word_at(s: &[u8]) -> Option<usize> {
+    let common = |w: &[u8]| {
+        COMMON
+            .iter()
+            .any(|c| w.iter().map(|b| unleet(*b)).eq(c.iter().copied()))
+    };
     (5..=24usize)
         .rev()
         .filter_map(|n| s.get(..n).map(|w| (n, w)))
-        .find(|(_, w)| w.iter().all(|c| c.is_ascii_alphabetic() || *c == b'-') && listed(w))
+        .find(|(_, w)| {
+            w.iter()
+                .all(|c| unleet(*c).is_ascii_lowercase() || *c == b'-')
+                && (listed(w) || common(w))
+        })
         .map(|(n, _)| n)
 }
 
+/// Row (shifted digits on the digit row) and column of `b` on [`KEYS`].
+fn key(b: u8) -> Option<(usize, usize)> {
+    let at = KEYS.iter().position(|k| *k == b.to_ascii_lowercase());
+    at.map(|i| (i / 10 % 4, i % 10))
+}
+
 /// Whether `c` is predictable from the text before it: a repeat of the
-/// previous character, its neighbour in code-point order or on a keyboard
-/// row, or the end of a character pair that occurred earlier.
+/// previous character, its neighbour in code-point order or on the
+/// keyboard (same row, or the two touching keys of the next row), or the
+/// end of a character pair that occurred earlier.
 fn predictable(before: &[u8], prev: char, c: char) -> bool {
     let ascii = (u8::try_from(prev).ok(), u8::try_from(c).ok());
-    let key = |byte: Option<u8>| {
-        let byte = byte?.to_ascii_lowercase();
-        KEY_ROWS.iter().position(|k| *k == byte)
+    let below =
+        |(r, c): (usize, usize), (s, d): (usize, usize)| s == r + 1 && (d == c || d + 1 == c);
+    let neighbours = match (ascii.0.and_then(key), ascii.1.and_then(key)) {
+        (Some(a), Some(b)) => (a.0 == b.0 && a.1.abs_diff(b.1) == 1) || below(a, b) || below(b, a),
+        _ => false,
     };
-    let neighbours =
-        matches!((key(ascii.0), key(ascii.1)), (Some(i), Some(j)) if i.abs_diff(j) == 1);
     let seen = matches!(ascii, (Some(p), Some(q)) if before.windows(2).any(|w| w == [p, q]));
     u32::from(prev).abs_diff(u32::from(c)) <= 1 || neighbours || seen
 }
@@ -485,15 +520,17 @@ fn predictable(before: &[u8], prev: char, c: char) -> bool {
 /// (log2 of guesses). Written by hand so that the password never leaves
 /// the arena (owner decision 2026-11-15: no `zxcvbn`). It reads `pw` in
 /// place and allocates nothing. A run of 3 or more bytes that occurred
-/// earlier counts 1 bit; a list word counts [`WORD_BITS`] (1 bit if it
-/// occurred before in another letter case); any other character counts
-/// log2 of its class size
-/// (26 letters, 10 digits, 33 punctuation, 64 otherwise), or 1 bit if
-/// [`predictable`]. A heuristic: it bounds common patterns, not every one.
+/// earlier counts 1 bit; a list word or common root counts [`WORD_BITS`]
+/// and a year 1900–2099 [`YEAR_BITS`] (either 1 bit if it occurred before
+/// in another letter case); a separator after such a token counts
+/// [`SEP_BITS`] if common, 0 if it repeats the previous separator; any
+/// other character counts log2 of its class size (26 letters, 10 digits,
+/// 33 punctuation, 64 otherwise), or 1 bit if [`predictable`]. A
+/// heuristic: it bounds common patterns, not every one.
 #[must_use]
 pub fn strength_bits(pw: &str) -> f64 {
     let bytes = pw.as_bytes();
-    let (mut bits, mut i, mut prev) = (0.0, 0, None::<char>);
+    let (mut bits, mut i, mut prev, mut sep) = (0.0, 0, None::<char>, None);
     while let Some(c) = pw.get(i..).and_then(|s| s.chars().next()) {
         let (before, rest) = bytes.split_at_checked(i).unwrap_or_default();
         // A run of 3 or more bytes that occurred before is one more guess.
@@ -505,16 +542,15 @@ pub fn strength_bits(pw: &str) -> f64 {
             .max()
             .unwrap_or(0);
         let again = (3..=again).rev().find(|n| pw.is_char_boundary(i + n));
-        if let Some(n) = again.or_else(|| word_at(rest)) {
-            let repeated = again.is_some()
-                || before
-                    .windows(n)
-                    .any(|w| w.eq_ignore_ascii_case(rest.get(..n).unwrap_or_default()));
-            bits += if repeated {
-                PREDICTABLE_BITS
-            } else {
-                WORD_BITS
-            };
+        let year = matches!(rest.get(..4), Some([b'1', b'9', a, b] | [b'2', b'0', a, b])
+            if a.is_ascii_digit() && b.is_ascii_digit());
+        let token = (again.map(|n| (n, PREDICTABLE_BITS)))
+            .or_else(|| word_at(rest).map(|n| (n, WORD_BITS)))
+            .or_else(|| year.then_some((4, YEAR_BITS)));
+        if let Some((n, b)) = token {
+            let w = rest.get(..n).unwrap_or_default();
+            let repeated = before.windows(n).any(|e| e.eq_ignore_ascii_case(w));
+            bits += if repeated { PREDICTABLE_BITS } else { b };
             (i, prev) = (i + n, None);
             continue;
         }
@@ -525,7 +561,14 @@ pub fn strength_bits(pw: &str) -> f64 {
             _ => 64.0,
         };
         let known = prev.is_some_and(|p| predictable(before, p, c));
-        bits += if known { PREDICTABLE_BITS } else { pool.log2() };
+        let joint = i > 0 && prev.is_none() && (c == ' ' || c.is_ascii_punctuation());
+        bits += match (joint, known) {
+            (true, _) if sep == Some(c) => 0.0,
+            (true, _) if " -_.".contains(c) => SEP_BITS,
+            (_, true) => PREDICTABLE_BITS,
+            _ => pool.log2(),
+        };
+        sep = if joint { Some(c) } else { sep };
         (i, prev) = (i + c.len_utf8(), Some(c));
     }
     bits
@@ -861,6 +904,14 @@ struct Session<'a> {
     clip_deadline: Option<Instant>,
 }
 
+/// Clear-if-unchanged on every exit path, unwinding from a panic included,
+/// before the `Clip` field is dropped (Section 11.3 steps 3 and 4).
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        self.expire_clip();
+    }
+}
+
 fn no_vault() -> Fail {
     fail(EXIT_INTERNAL, "internal error: no open vault")
 }
@@ -992,22 +1043,26 @@ impl Session<'_> {
             return Err(no_vault());
         };
         self.prompt("Master password: ", To::Pw1, true)?;
-        let (mut header, out) = vault::unlock(
-            &file,
-            &mut self.pw1,
-            &mut self.pw2,
-            &mut self.kek,
-            &mut self.dek,
-            &mut live,
-            self.opts.require_locked_kdf,
-        )?;
-        self.kdf_notice(&out);
+        let locked = self.opts.require_locked_kdf;
+        let derived = vault::derive(&file, &mut self.pw1, &mut self.pw2, &mut self.kek, locked);
+        // The notice also when the password proves wrong (review R-12).
+        if let Ok(out) = &derived {
+            self.kdf_notice(out);
+        }
+        let (kek, dek) = (self.kek.expose(), &mut self.dek);
+        let opened = derived.and_then(|_| vault::open_with_kek(&file, kek, dek, &mut live));
+        self.kek.clear();
+        sys::scrub_stack();
+        let mut header = opened?;
         let fresh = store.freshness(&header)?;
         if let Freshness::RolledBack { file, recorded } = fresh {
             self.say(&rollback_warning(file, recorded));
-            self.prompt("\nType yes to continue: ", To::Input, false)?;
-            confirm_rollback(&mut header, fresh, self.input.expose())
-                .map_err(|code| leave(code, "rollback not acknowledged; vault not opened"))?;
+            // Into `Pw2` (free after unlock), never `Input`: a one-shot
+            // command's argument spans still point into `Input`.
+            let read = self.prompt("\nType yes to continue: ", To::Pw2, false);
+            let ok = read.map(|()| confirm_rollback(&mut header, fresh, self.pw2.expose()));
+            self.pw2.clear();
+            ok?.map_err(|code| leave(code, "rollback not acknowledged; vault not opened"))?;
         }
         let model = vault::Model::new(live, scratch)?;
         self.vault = Some(Vault {
@@ -1141,6 +1196,8 @@ impl Session<'_> {
             &mut self.pw1,
             &mut self.pw2,
             &mut self.r#gen,
+            &mut self.kek,
+            &mut self.new_dek,
         ] {
             slot.clear();
         }
@@ -1516,13 +1573,15 @@ fn cmd_passwd(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
     let (m, t) = kdf_options(cmd, ses.input.expose())?;
     let weak = cmd.has("--accept-weak-password");
     let locked = ses.opts.require_locked_kdf;
-    ses.prompt("Current master password: ", To::Pw1, true)?;
     let old = ses.vault.as_ref().ok_or_else(no_vault)?.header.clone();
     let aad = old.encode();
     let current = KdfParams {
         m_kib: old.kdf_m_kib,
         t: old.kdf_t,
     };
+    // Checked before any prompt or key derivation (review finding R-12).
+    let params = KdfParams::for_write(m.unwrap_or(current.m_kib), t.unwrap_or(current.t))?;
+    ses.prompt("Current master password: ", To::Pw1, true)?;
     // Verify the current password: derive its KEK and unwrap the DEK.
     let nfc = crypto::normalize(ses.pw1.expose(), &mut ses.pw2);
     ses.pw1.clear();
@@ -1547,7 +1606,6 @@ fn cmd_passwd(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
     sys::scrub_stack();
     ses.kdf_notice(&checked?);
     ses.new_password(weak)?;
-    let params = KdfParams::for_write(m.unwrap_or(current.m_kib), t.unwrap_or(current.t))?;
     let rekeyed = vault::passwd(
         &old,
         ses.pw2.expose(),
@@ -1566,7 +1624,17 @@ fn cmd_passwd(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
     saved.map_err(|e| leave(store_exit_code(&e), e.message()))?;
     vault::adopt_dek(&mut ses.dek, &mut ses.new_dek)?;
     v.header = header;
+    // The backups are still encrypted under the old password (R-11).
+    let purged = if cmd.has("--purge-backups") {
+        v.store.purge_backups().map(|()| "Backups deleted.\n")
+    } else {
+        Ok(
+            "Note: the backups (.1 to .5) still open with the old password until later \
+            saves replace them; `passwd --purge-backups` deletes them.\n",
+        )
+    };
     ses.say("Master password changed.\n");
+    ses.say(purged.map_err(|e| fail(store_exit_code(&e), "deleting the backups failed"))?);
     Ok(())
 }
 
@@ -1606,9 +1674,15 @@ fn cmd_import(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
         Some(b"suffix") => true,
         Some(_) => return Err(user("--on-conflict takes abort or suffix")),
     };
-    let piped = cmd.has("--from-stdin") && !ses.hard.stdin_tty;
+    // A pipe only, not a terminal or a regular file (Section 12.2 step 1),
+    // and refused before any key derivation.
+    if !(cmd.has("--from-stdin") && ses.hard.stdin_pipe) {
+        return Err(user(
+            "import reads a canonical body from a pipe: `... | pwv import --from-stdin`",
+        ));
+    }
     if ses.vault.is_none() {
-        if let (true, Some((_, scratch))) = (piped, ses.halves.as_mut()) {
+        if let Some((_, scratch)) = ses.halves.as_mut() {
             read_pipe(scratch)?;
             // Nothing arrived: the producer failed. Refuse before asking
             // for the master password.
@@ -1618,11 +1692,6 @@ fn cmd_import(ses: &mut Session<'_>, cmd: &Cmd) -> Result<(), Fail> {
         }
         ses.unlock().map_err(|f| leave(f.code, &f.msg))?;
         sys::scrub_stack();
-    }
-    if !piped {
-        return Err(user(
-            "import reads a canonical body from a pipe: `... | pwv import --from-stdin`",
-        ));
     }
     let v = ses.vault.as_mut().ok_or_else(no_vault)?;
     let count = v.model.import(suffix).map_err(|e| match e {
@@ -1704,6 +1773,14 @@ fn cmd_quit(_: &mut Session<'_>, _: &Cmd) -> Result<(), Fail> {
     Err(leave(0, ""))
 }
 
+/// `memtest` only: panics, so that tests reach the unwinding path (review
+/// finding R-08: clipboard cleared, exit code 5).
+#[cfg(feature = "memtest")]
+#[allow(clippy::panic, reason = "memtest hook for the unwinding path")]
+fn cmd_panic(_: &mut Session<'_>, _: &Cmd) -> Result<(), Fail> {
+    panic!("__panic");
+}
+
 /// `memtest` only (Section 5.8): blocks until the harness sends SIGUSR1.
 #[cfg(feature = "memtest")]
 fn cmd_pause(ses: &mut Session<'_>, _: &Cmd) -> Result<(), Fail> {
@@ -1739,10 +1816,13 @@ const GEN_FLAGS: &[(&str, bool)] = &[
     ("--sep", true),
     ("--show", false),
 ];
-const KEY_FLAGS: &[(&str, bool)] = &[
+/// `init` takes the first three.
+const KEY_FLAGS: &[(&str, bool)] = PASSWD_FLAGS.split_at(3).0;
+const PASSWD_FLAGS: &[(&str, bool)] = &[
     ("--kdf-memory", true),
     ("--kdf-time", true),
     ("--accept-weak-password", false),
+    ("--purge-backups", false),
 ];
 
 const fn row(
@@ -1782,13 +1862,15 @@ pub const COMMANDS: &[CommandSpec] = &[
     row(&["mvfield"], "mvfield <name> <old> <new>", "rename a field", (3, 3), &[], true, cmd_mvfield),
     row(&["rm"], "rm <name>", "delete an entry", (1, 1), &[], true, cmd_rm),
     row(&["gen"], "gen [--len L] [--classes luds] [--symbols S] [--no-ambiguous] [--words k] [--sep c] [--show]", "generate and copy a password or passphrase", (0, 0), GEN_FLAGS, false, cmd_gen),
-    row(&["passwd"], "passwd [--kdf-memory MiB] [--kdf-time t] [--accept-weak-password]", "change the master password", (0, 0), KEY_FLAGS, true, cmd_passwd),
+    row(&["passwd"], "passwd [--kdf-memory MiB] [--kdf-time t] [--accept-weak-password] [--purge-backups]", "change the master password; --purge-backups deletes the backups, which the old one opens", (0, 0), PASSWD_FLAGS, true, cmd_passwd),
     row(&["import"], "import --from-stdin [--on-conflict abort|suffix]", "merge a canonical body from a pipe", (0, 0), &[("--from-stdin", false), ("--on-conflict", true)], false, cmd_import),
     row(&["doctor"], "doctor", "report the security posture of the environment", (0, 0), &[], false, cmd_doctor),
     row(&["help"], "help", "show this list", (0, 0), &[], false, cmd_help),
     row(&["quit", "exit", "lock"], "quit (exit, lock)", "wipe and exit", (0, 0), &[], false, cmd_quit),
     #[cfg(feature = "memtest")]
     row(&["__pause"], "__pause", "", (0, 0), &[], false, cmd_pause),
+    #[cfg(feature = "memtest")]
+    row(&["__panic"], "__panic", "", (0, 0), &[], false, cmd_panic),
 ];
 
 /// Runs the program after [`crate::sys::harden`] and returns the exit code
