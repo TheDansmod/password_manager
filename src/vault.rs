@@ -259,9 +259,6 @@ pub fn open_with_kek(
     res
 }
 
-/// The stand-in payload key after a failed unwrap (see `open_inner`).
-const ZERO_KEY: [u8; KEY_LEN] = [0; KEY_LEN];
-
 fn open_inner(
     file: &[u8],
     kek: &[u8],
@@ -272,12 +269,15 @@ fn open_inner(
     let aad = file.get(..HEADER_LEN).ok_or(format::Error::HeaderLength)?;
     let aad_w = aad.get(..AAD_W_LEN).ok_or(format::Error::HeaderLength)?;
     let unwrapped = crypto::unwrap_dek(kek, &h.wrap_nonce, &h.wrapped_dek, aad_w, dek);
-    // A wrong password still copies and authenticates the payload, under
-    // a fixed key that cannot match, so that both tag failures cost the
-    // same work (review finding R-10); the unwrap's error is returned.
-    let key = unwrapped
-        .as_ref()
-        .map_or::<&[u8], _>(&ZERO_KEY, |()| dek.expose());
+    // A wrong password still copies and authenticates the payload, so
+    // that both tag failures cost the same work (review finding R-10);
+    // the unwrap's error is returned whatever this gives, and `open`
+    // wipes `body`. The stand-in key is the KEK just derived: the right
+    // length, secret, and not the DEK, so the vault's own payload fails.
+    // Not a constant: a fixed key is a hard-coded key (CodeQL), and
+    // anyone could craft a payload that authenticates under it. Nothing
+    // is ever sealed under this key; it only verifies and is dropped.
+    let key = unwrapped.as_ref().map_or(kek, |()| dek.expose());
     let opened = body.set_len(ct.len()).map(|()| {
         body.expose_mut().copy_from_slice(ct);
         crypto::open(key, &h.payload_nonce, aad, body.expose_mut(), tag)

@@ -3467,7 +3467,7 @@ findings.
 | R-07 Low, T-MEM-4 gaps | Valid. | Two new T-MEM-4 tests. `t_mem_4_passwd_add_gen_names_and_keys`: canary entry name and field key, `add` with a generated value, `passwd` to a chosen P2 and then to a generated passphrase; mid-session no master password (old or new) anywhere, names, keys, and values only in the arena; after `lock` nothing. `t_mem_4_init_import_and_refusals_are_wiped`: `init` with the generated passphrase, `import` of a canary body (through a FIFO, so that `pwv` keeps the PTY's PID), a wrong password (exit 2), a refused rollback (exit 3), each scanned after the wipe. Controls: a heap copy of the imported body, and of the current password in `passwd`, each fail them naming canary and mapping. |
 | R-08 Low, panic skips the clipboard clear, exit 101 | Exit code: valid. Clipboard: the hand-over to a manager does not happen in practice (`clip` always sets the history hint, and arboard 3.7.0's `Drop` then skips the hand-over, `x11.rs` `ask_clipboard_manager_to_request_our_data`), but clearing was still skipped. | `impl Drop for Session` runs `expire_clip`; `main` wraps `cli::run` in `catch_unwind` → exit code 5 after every `Drop` ran. New `memtest`-only command `__panic` (Section 5.8 extended). Tests: `panic_exits_with_code_5_and_the_fixed_message` (101 without the fix), `x11::panic_exit_clears_the_clipboard` (CI, `e2e` job, new step). |
 | R-09 Info, unreadable clipboard left serving | Valid for Wayland (on X11 the owner reads its own data locally and cannot fail). Spec 11.3 step 3 said "if the read fails, still zero the slot" (no clear). | Deviation, fail closed: the clipboard is left alone only when the read shows it holds something else (other text; `ContentNotAvailable`: empty or another format; `ConversionFailure`: not UTF-8, so not ours); any other read error clears it. T-CLIP-3 (a foreign value is kept) is unaffected. Not testable here (no display); CI covers X11 only. |
-| R-10 Info, timing separates wrong password from damaged payload | Valid; measured: 1 µs against 144 µs (release, 464 KiB payload). | `open_inner`: after a failed unwrap the payload is still copied and authenticated under a fixed all-zero key (cannot match), then the unwrap's `Auth` is returned (error precedence unchanged). Measured after: 144 µs both. One-off measurement, not a CI test (timing tests flake). |
+| R-10 Info, timing separates wrong password from damaged payload | Valid; measured: 1 µs against 144 µs (release, 464 KiB payload). | `open_inner`: after a failed unwrap the payload is still copied and authenticated under a fixed all-zero key (cannot match), then the unwrap's `Auth` is returned (error precedence unchanged). Measured after: 144 µs both. (The stand-in key is now the KEK itself, not a constant: entry "PR run of the review and mutation fixes" below.) One-off measurement, not a CI test (timing tests flake). |
 | R-11 Info, backups survive `passwd` | Valid. Re-encrypting them is not possible in general (backups older than an earlier `passwd` use DEKs that are gone). | `passwd` prints a notice; new option `passwd --purge-backups` deletes `.1` to `.5` after the durable save and `fsync`s the directory (`Store::purge_backups`). README and THREAT_MODEL (a dated section outside the verbatim Sections 2 and 18). Tests: `purge_backups_deletes_exactly_the_backups` (store), `passwd_notice_and_purge_backups` (e2e). |
 | R-12 Info, `passwd`/unlock lifecycle | Valid. | `tidy` also clears `Kek` and `NewDek`; `passwd` checks `KdfParams::for_write` before any prompt; the 5.4 notice is printed also when the password proves wrong: `vault::unlock` is split into `vault::derive` + `open_with_kek` (its signature is kept for tests and fuzz targets), and `cli` prints the notice between them. Test: `passwd_checks_parameters_first_and_kdf_notice_on_failure` (memlock lowered to at most 4 MiB, never raised; fails without the fix). |
 | R-13 Info (A8), word lookup time ∝ index | Valid, out of scope, cheap to remove. | `gen::OFFSETS`, a `const` reference to a table of 205,690 word offsets computed by a `const fn` at compile time (a short list fails the build); lookup is O(1). A `static` would be simpler but T-ENG-3 bars statics. Compile cost about 2 s per build of the library; the binary grows by 0.8 MB. Checked that no copy reaches the stack (a passphrase generated on a 256 KiB thread stack). Under Miri the constant is evaluated lazily in the test crate, where the item's `allow(long_running_const_eval)` does not apply, so `tests/gen.rs` allows that lint crate-wide. `word_draw_first_middle_and_last_index` under Miri: 4m50 locally (13m03 before). |
@@ -3627,6 +3627,68 @@ updated table, and replaying the CI's uncovered list against it leaves
 nothing unjustified once `offsets` and `store.rs:436` are covered. Not
 checked here: the coverage percentages themselves (no `llvm-tools` in the
 sandbox); the next PR run measures them.
+
+## 2026-11-18 — PR run of the review and mutation fixes: `e2e` and both `coverage` jobs; CodeQL
+
+**What failed.** `e2e`, `coverage (default)` and `coverage (memtest)`,
+hence `ci-ok`; one test in all three:
+`x11::a_foreign_non_text_clipboard_is_not_cleared` panicked at its
+precondition, `assert!(xclip_out("UTF8_STRING").is_none(), "no text on
+offer")`. Every other test passed in every job; the coverage jobs fail on
+any test failure (`--no-fail-fast`, exit 101), after writing the report.
+
+**Cause: the test, not pwv.** The test assumed that
+`xclip -i -t image/png` offers that target only and refuses text. It does
+not: xclip answers a request for any target other than `TARGETS` with its
+data, with the property typed `image/png`; `xclip -o -t UTF8_STRING`
+does not check the type, so it printed `not text`. The coverage artefact
+shows what pwv did with that owner: `clip.rs` line 101 (`Err(false)`,
+"cannot be read") was covered and line 100 (`ContentNotAvailable`) was
+not. arboard 3.7.0 `x11.rs` `handle_read_selection_notify` accepts a
+reply only if its type is the requested target or `INCR`, and otherwise
+returns `Error::Unknown("incorrect type received from clipboard")`, which
+pwv maps to "cannot be read" and so clears (fail closed, R-09). That is
+the designed behaviour; the 2026-11-18 coverage entry's statement that
+only a failing X connection reaches line 101 was wrong: a non-conforming
+owner does too.
+
+**Fixes.**
+- `a_foreign_non_text_clipboard_is_not_cleared` now uses a conforming
+  owner written with x11rb (`image_owner`, a thread like the mock
+  clipboard manager): it owns CLIPBOARD, lists `TARGETS` and
+  `image/png`, serves `image/png`, refuses every other target with
+  property `None` (ICCCM 2.2), and records a `SelectionClear`. The test
+  checks the refusal with xclip, then that the owner kept the selection
+  and its data at the deadline and at exit. arboard then gets
+  `ContentNotAvailable` for every text target: line 100.
+- New `an_unreadable_clipboard_is_cleared_at_exit` keeps the xclip case
+  as the fail-closed test: copy, `xclip -t image/png` takes the
+  clipboard, `quit`; afterwards nothing serves `image/png` and there is
+  no text. Covers line 101. With line 100 covered too, the only `clip.rs` line
+  this run's lcov left uncovered is 75.
+
+**CodeQL "hard-coded cryptographic value" (`vault.rs`, `ZERO_KEY`).**
+Not exploitable: the all-zero key only verified the payload tag after a
+failed unwrap (R-10, equal work for both failures), its result was
+discarded, the unwrap's error was returned first and `open` wiped
+`body`; nothing was ever sealed under it. But the alert is fair on two
+counts: it is a constant key in a crypto path, and the comment's "cannot
+match" was false (anyone can seal a payload under the zero key; still
+harmless, since the result is ignored). Fix: the stand-in key is the KEK
+just derived from the entered password: the right length, secret, never
+the DEK, no new failure path (a random key would add an RNG error and an
+uncovered line). Nothing is sealed under it, so no nonce reuse arises.
+The edit keeps `vault.rs` the same number of lines, so the coverage
+exception `vault.rs:334` and the surviving-mutant rows `390:40` and
+`655:69` still point at the same code (checked); tokei: vault 492/500.
+
+**Checked locally:** fmt; clippy in the five `--all-targets` configs and
+the fuzz targets; the `cfg(miri)` compile checks for the lib and
+`vault`; full `cargo test --features memtest,testkdf` (all pass; the X11
+tests return at once without a display); `test_ids.py`; LOC budget.
+**Not checked here** (no X server or xclip in the sandbox): the two
+X11 tests themselves and the coverage figures; the next PR run is the
+first to execute them. CodeQL reruns on the push.
 
 ## Changes to the owner's specification
 
