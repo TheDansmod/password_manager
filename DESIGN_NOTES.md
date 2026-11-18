@@ -3225,3 +3225,93 @@ not run.
 
 `src/` and `tests/` unchanged. Local checks: `sh -n scripts/lazyfs.sh`,
 `ci.yml` parses (PyYAML 6.0.2), `test_ids.py --check` (81 IDs).
+
+## 2026-11-18 — M9 second full run; first mutants run; badges, release tag check, README for users
+
+**Second full run on `main` (owner's report, "Run workflow").** By the
+`coverage-report` summary, everything passed: T-STORE-8's first real run
+under LazyFS (`durability` 7m50), T-SAN-1 with the named LSan exception,
+coverage gates (overall lines 96.73 %, gated modules 99.04 to 100 %), 80
+of 81 test IDs (T-MUT-1 showed "job": it lives in `mutants.yml`). Times
+are within their caps (`test` 1h01m59, `test-arm64` 57m38, the slowest
+Miri part 1h56m14). Caps unchanged this round; `durability` (cap 60) can
+come down after a second measured run. It was a manual run, so it does
+not count as one of the two nightly runs of the definition of done.
+
+**First `mutants.yml` run: every job failed before testing anything.**
+`cargo test ... --skip t_store_3_kill_loop ...: unexpected argument
+'--skip'`. cargo-mutants 27.1.0 appends what follows its own `--` to
+`cargo test`'s arguments, so the test binaries' `--skip` needs a second
+`--` (`-- -- --skip ...`). The round-2 local trial ran pass 1 without the
+skips, so it did not show this. Fixed in `scripts/mutants.sh`; checked
+locally: cargo-mutants' baseline log shows `cargo test ... --lib
+--test=gen -- --skip t_store_3_kill_loop --skip
+t_store_8_kill_loop_with_power_loss`, and the baseline passes.
+Passes 2 and 3 (`--iterate` over pass 1's survivors) had never run
+either, so the whole script ran locally on `crypto` shard `13/34`, which
+holds exactly the known memtest-only mutant `src/crypto.rs:197:69: replace
+== with != in argon2_in_region`: pass 1 missed it (3 min), pass 2 (full
+suite, default; `--iterate` excluded the other 33) missed it (17 min),
+pass 3 (`memtest,testkdf`) caught it (12 min); 0 survivors,
+`mutants_check.py` exit 0. Full-suite baselines took 479 s and 546 s on
+16 cores, so a shard's cost is dominated by its pass-2/3 survivors: about
+9 min each, twice.
+
+**Badges (owner, 2026-11-18; changes decision 3's "only on pushes").**
+- `coverage-report` now pushes the badges from runs on `main` started by
+  `push`, `schedule` or `workflow_dispatch`; never from `pull_request`
+  (no fork can start the other three). The full run of 2026-11-17 and
+  this one were manual, so no badge had been pushed.
+- The test-ID badge comes from full runs only: a push run fetches the
+  `badges` branch and keeps its `test-ids.svg` (if there is none yet, it
+  pushes its own). The coverage badge comes from every such run. The
+  branch stays one orphan commit. Checked locally against a bare
+  repository: push (no branch) → own badges; dispatch → both replaced;
+  push → coverage replaced, test IDs kept; schedule → both replaced.
+- **T-MUT-1 in the report:** a step asks the GitHub API for the latest
+  completed `mutants.yml` run on `main` (`gh api`, job permission
+  `actions: read`; `continue-on-error`). `coverage_report.py --mutants`
+  turns it into the `mutants` job result that T-MUT-1's evidence already
+  names: success → pass, failure → fail; cancelled, none, or finished more
+  than 8 days ago (weekly plus a day) → not run. The 8-day limit is my
+  interpretation (rule 10): an older run says nothing about the current
+  week. The summary prints the run's URL, commit and time. A failing
+  T-MUT-1 does not fail `coverage-report` (no test-ID row does). The jq
+  filter was checked with the jq library on both API shapes; the report's
+  self-test covers the five cases.
+- Spec 14.13 says "On pushes to `main`"; this is the owner's change.
+
+**Release tag check (owner).** `release-build.yml` fails when the tag is
+not `v` + `Cargo.toml`'s version (file names come from the version, so a
+mismatch would attest files under the wrong version). The step runs only
+when `github.ref_type == 'tag'`; `ci.yml`'s `release-check` does not use
+this workflow, so ordinary runs are unaffected. Checked locally: `v0.1.0`
+passes; `v0.1.0-rc.1`, `0.1.0`, `v0.1` fail. A version bump must update
+both lock files (`cargo update -p pwv --offline`, in the root and in
+`fuzz/`): checked on a copy with `0.1.0-rc.1`, after which `cargo
+metadata --locked` accepts both.
+
+**Documentation (owner).**
+- `README.md` rewritten for users: what pwv is and why, when another tool
+  fits better, quick start (install, `doctor`, first session), then
+  entries and fields, commands, generator, clipboard, master password,
+  options, file locations and backups, importing, exit codes, residual
+  risks, building from source, verifying a release, licence, word list.
+  Claims checked against the code (prompts of `add`, `gen` needs no
+  vault, no `--version` flag, Wayland data-control feature) and the
+  measured unlock time (0.285 s, M9 round 2). Release files are x86_64
+  only (the release job runs on an x86_64 runner).
+- The migration section moved out of the repository, to
+  `/workspace/pwv_legacy_migration.md` (owner: it concerns only their
+  legacy vault). This departs from spec 12.3 and 15.4 ("migration
+  checklist" in `README.md`) by the owner's decision. `tools/README.md`
+  points to the script's docstring instead.
+- New `DEVELOPMENT.md`: the check list formerly in the README, the
+  workflows and when they run, the badge rules, and the release procedure
+  with a rehearsal (pre-release version, draft or pre-release on GitHub).
+- `SECURITY.md`: `sha256sum -c --ignore-missing`, so verifying only the
+  binary does not report the licence files as missing.
+
+`src/` and `tests/` unchanged. Local checks: `coverage_report.py
+--self-test`, `test_ids.py --check` (81 IDs), all four workflows parse
+(PyYAML 6.0.2), `sh -n scripts/mutants.sh`.

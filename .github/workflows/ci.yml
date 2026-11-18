@@ -38,14 +38,17 @@
 # Section 14 inventory check in `lint` (scripts/test_ids.py).
 # M9 (round 2): `coverage` (spec 14.13: five instrumented configurations,
 # every push), `coverage-branch` (T-COV-5, nightly), `coverage-report`
-# (merge, T-COV-1 .. T-COV-5, the job summary, artefacts, and the badges on
-# pushes to `main`: the only job with `contents: write`), `fuzz-long`
+# (merge, T-COV-1 .. T-COV-5, the job summary, artefacts, and the badges
+# from runs on `main`: the only job with `contents: write`), `fuzz-long`
 # (30 min per target, corpus kept, T-COV-6), `perf` (T-PERF-1, nightly),
 # and T-STORE-8 (LazyFS) in `durability`. T-MUT-1 is the weekly
 # workflow mutants.yml.
 # M9 (first full run on `main`, 2026-11-17): `sanitizers-asan` accepts one
 # named false report (LSan's ptrace self-test after an interrupted waitpid);
 # `durability` builds LazyFS under CMake 4 and pins its commit.
+# M9 (2026-11-18, owner): badges also from nightly and "Run workflow" runs
+# on `main` (test IDs from full runs only); T-MUT-1 from mutants.yml's
+# latest run.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
@@ -1146,8 +1149,15 @@ jobs:
     # result of each job named as evidence). Artefacts kept 30 days.
     # Waits for every job of the run (nightly ones are skipped on pushes).
     # The only job with `contents: write` (spec 14.13; owner decision 3):
-    # it pushes two SVG badges to the orphan `badges` branch, and only on
-    # pushes to `main`. Provisional cap 15 until measured.
+    # it pushes two SVG badges to the orphan `badges` branch, only from runs
+    # on `main` that no fork can start: pushes, the nightly schedule, and
+    # "Run workflow" (owner, 2026-11-18; never on pull_request). The
+    # coverage badge comes from every such run; the test-ID badge only from
+    # full runs (nightly, "Run workflow"), since a push run skips the
+    # nightly gates: a push run keeps the branch's previous test-ID badge.
+    # T-MUT-1 is the latest completed mutants.yml run on `main` (GitHub
+    # API, `actions: read`), counted if it finished within 8 days.
+    # Provisional cap 15 until measured.
     needs:
       - lint
       - test
@@ -1170,10 +1180,21 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      actions: read # the latest mutants.yml run (T-MUT-1)
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+      # T-MUT-1 lives in mutants.yml. A failed lookup leaves mutants.json
+      # missing, and the report then counts T-MUT-1 as not run.
+      - name: Latest completed mutants.yml run on main (T-MUT-1)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/mutants.yml/runs?branch=main&status=completed&per_page=1" \
+            --jq '.workflow_runs[0] // {} | {conclusion, head_sha, updated_at, html_url}' > mutants.json
+          cat mutants.json
       - name: Download the coverage runs
         uses: actions/download-artifact@v7
         with:
@@ -1202,7 +1223,7 @@ jobs:
             --baseline coverage/baseline.json --notes DESIGN_NOTES.md --jobs needs.json \
             --summary "$GITHUB_STEP_SUMMARY" --merged-lcov out/merged.lcov \
             --new-baseline out/baseline-candidate.json --badges out/badges \
-            --logs $(find logs -name '*.txt') || status=$?
+            --mutants mutants.json --logs $(find logs -name '*.txt') || status=$?
           echo "COVERAGE_STATUS=$status" >> "$GITHUB_ENV"
       - name: Keep the report (merged LCOV, baseline candidate, badges)
         if: always()
@@ -1211,17 +1232,28 @@ jobs:
           name: coverage-report
           path: out/
           retention-days: 30
-      - name: Push the badges to the orphan `badges` branch (pushes to main only)
-        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Push the badges to the orphan `badges` branch (runs on main, never pull requests)
+        if: ${{ always() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event_name) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd out/badges
+          repo="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git init -q -b badges
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # A push run skips the nightly gates: keep the test-ID badge of
+            # the last full run, if there is one.
+            if git fetch -q --depth 1 "$repo" badges 2>/dev/null \
+              && git show FETCH_HEAD:test-ids.svg > test-ids.prev 2>/dev/null; then
+              mv test-ids.prev test-ids.svg
+              echo "test-ids.svg kept from the last full run"
+            fi
+            rm -f test-ids.prev
+          fi
           git add coverage.svg test-ids.svg
-          git commit -q -m "Badges for $GITHUB_SHA"
-          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+          git commit -q -m "Badges for $GITHUB_SHA ($GITHUB_EVENT_NAME run $GITHUB_RUN_ID)"
+          git push -q --force "$repo" badges
       - name: Gates
         run: exit "${COVERAGE_STATUS:-1}"
