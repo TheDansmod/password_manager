@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sets pwv's version for a release (DEVELOPMENT.md, "Releasing"), without
+# Sets pwv's version for a release (docs/DEVELOPMENT.md, "Releasing"), without
 # cargo, a Rust toolchain, or network access:
 #
 #   sh scripts/set_version.sh 0.1.0-rc.1

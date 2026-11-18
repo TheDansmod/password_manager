@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from prodcode import self_test, strip_cfg_test  # noqa: E402
 
 # (group name, files, target, hard cap). lib.rs is crate glue and is charged
-# to the cli + main group, the conservative choice (DESIGN_NOTES.md).
+# to the cli + main group, the conservative choice (docs/DESIGN_NOTES.md).
 GROUPS = [
     # M7: cli + main 1,700 and total 4,800 (owner, spec Section 3 table,
     # 2026-11-15; DESIGN_NOTES, M7).

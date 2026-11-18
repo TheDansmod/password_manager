@@ -3,9 +3,9 @@
 # 2026-11-16): one job per module and shard; a fast first pass against the
 # module's own tests, then every survivor re-run against the full suite
 # (default features, then memtest,testkdf) before it counts
-# (scripts/mutants.sh). Survivors must be justified in DESIGN_NOTES.md
+# (scripts/mutants.sh). Survivors must be justified in docs/DESIGN_NOTES.md
 # (scripts/mutants_check.py). A release tag needs a green run of this
-# workflow first (DEVELOPMENT.md, "Releasing"); "Run workflow" starts one by hand.
+# workflow first (docs/DEVELOPMENT.md, "Releasing"); "Run workflow" starts one by hand.
 # Kept apart from ci.yml so its weekly schedule cannot trigger the nightly
 # jobs. Shards are sized from a local trial (about 40 s per mutant for
 # `crypto` on 16 cores, 2026-11-17); provisional cap 350 until measured.
@@ -68,8 +68,8 @@ jobs:
           sh scripts/lazyfs.sh "$RUNNER_TEMP/lazyfs"
       - name: T-MUT-1 ${{ matrix.module }} shard ${{ matrix.shard }}
         run: sh scripts/mutants.sh ${{ matrix.module }} ${{ matrix.shard }} "$RUNNER_TEMP/mut"
-      - name: Survivors are justified in DESIGN_NOTES.md
-        run: python3 -I scripts/mutants_check.py DESIGN_NOTES.md "$RUNNER_TEMP/mut/survivors.txt"
+      - name: Survivors are justified in docs/DESIGN_NOTES.md
+        run: python3 -I scripts/mutants_check.py docs/DESIGN_NOTES.md "$RUNNER_TEMP/mut/survivors.txt"
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@v6

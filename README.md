@@ -11,7 +11,10 @@ in memory, on screen, and on the clipboard.
 
 > **Status: pre-release.** Every feature is implemented and tested, but
 > there is no published release yet; until there is, [build it from
-> source](#building-from-source).
+> source](#building-from-source). pwv has **not yet been independently
+> audited** and has no track record of real-world use; see [How pwv
+> compares](#how-pwv-compares) before you trust it with your only copy of
+> your passwords.
 
 ## Why pwv
 
@@ -20,10 +23,12 @@ in memory, on screen, and on the clipboard.
   256 MiB by default). Without the master password, it does not reveal
   how many entries you have, what they are called, or which sites you
   use; only roughly how big it is. Any change to the file is detected.
-- **Secrets stay out of memory leaks.** While the vault is open, every
-  secret lives in one locked memory region that never goes to swap or
-  into a core dump, and it is wiped when you lock or quit. Other programs
-  running as you cannot attach a debugger to pwv or read its memory.
+- **Secrets leave as few traces in memory as possible.** While the vault
+  is open, every secret lives in one locked memory region that never goes
+  to swap or into a core dump, and it is wiped when you lock or quit.
+  Other programs running as you cannot attach a debugger to pwv or read
+  its memory (malware that was already running as you before pwv
+  started is a different matter; see below).
 - **Safe saves.** Every change is saved at once, atomically: after a crash
   or power cut you have either the old vault or the new one, never a
   broken one. The five previous versions are kept next to it. If someone
@@ -50,7 +55,8 @@ TOTP codes, or sharing with other people. Tools such as KeePassXC,
 Bitwarden or `pass` offer those. pwv trades them for a smaller,
 offline, terminal-only design. You can still sync the vault file
 yourself (it is safe to store on cloud storage), but pwv does not merge
-copies edited in two places.
+copies edited in two places. For a side-by-side look at what pwv does
+better and worse than those tools, see [How pwv compares](#how-pwv-compares).
 
 **There is no recovery.** If you forget your master password, your
 vault cannot be opened, by you or by anyone else. Keep a copy of the
@@ -245,7 +251,7 @@ asks you to type `yes` before opening it.
 ### Importing
 
 `pwv import --from-stdin` adds entries read from a pipe, in pwv's own
-plain-text body format (documented in [`FORMAT.md`](FORMAT.md), Section 3),
+plain-text body format (documented in [`docs/FORMAT.md`](docs/FORMAT.md), Section 3),
 for example from a script that converts another manager's data:
 
 ```sh
@@ -269,10 +275,144 @@ No program can protect your secrets from malware already running as your
 user (a keylogger, a modified `pwv`), from root or the kernel, or from
 someone with physical access to the running machine. Values you reveal
 also pass through your terminal emulator, and values you copy through the
-clipboard. [`THREAT_MODEL.md`](THREAT_MODEL.md) lists exactly what pwv
+clipboard. [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) lists exactly what pwv
 defends against and what it does not. For the best protection, use full
 disk encryption, encrypted swap (or none), and no hibernation; `pwv doctor`
 checks the last two.
+
+## How pwv compares
+
+This section compares pwv with three popular open-source password managers
+**only on what pwv itself does**: keeping a local vault, unlocking it,
+showing and copying secrets, generating passwords, and keeping the vault
+safe on disk. Browser extensions, autofill, sync services, mobile apps and
+sharing are left out; if you need those, pwv is not the right tool anyway.
+
+- **KeePassXC**: a desktop app (with a command-line tool, `keepassxc-cli`)
+  using the KeePass file format (KDBX).
+- **pass**: "the standard Unix password manager", a shell script that
+  keeps each entry as a separate GnuPG-encrypted file.
+- **Bitwarden CLI** (`bw`): the command-line client of Bitwarden, an
+  account-based manager with a server (Bitwarden's or self-hosted).
+
+What we say about the other tools comes from their documentation, their
+maintainers' public statements and published reviews, checked in November
+2026 (sources at the end of this section). Where we could not confirm
+something, we say **"not checked"** or **"not known to us"**: that means
+we don't know, not that the tool lacks it. Corrections are welcome
+(open an issue).
+
+### At a glance
+
+| | pwv | KeePassXC | pass | Bitwarden CLI |
+| --- | --- | --- | --- | --- |
+| Where the vault lives | One encrypted file, local | One encrypted file, local | A folder of encrypted files, one per entry | Your account on a server, cached locally |
+| Entry names hidden from someone with the file(s) | Yes | Yes | **No**: file names are in plain text | Yes (encrypted on your device) |
+| File size reveals roughly how much is stored | Padded: only an upper bound | Not checked | Yes (one file per entry) | Not applicable (server-side) |
+| Default master-password hashing | Argon2id, 256 MiB, 3 passes | Argon2 (d or id, depending on version), 64 MiB, tuned to about 1 s | GnuPG's protection of your private key: iterated hashing, not memory-hard | PBKDF2-SHA256, 600,000 iterations; Argon2id (32 MiB) optional |
+| Second factor for unlocking (key file, hardware key) | **No**: password only | **Yes**: key file and/or YubiKey | Your GnuPG key (can live on a smart card) | Account two-step login (protects the server account) |
+| Tampering with the file detected | Yes, any byte | Yes | Each file is checked, but entries are not signed: anyone with your *public* key can add or replace an entry | Yes |
+| Detects an older copy swapped in (rollback) | **Yes**, warns before opening | Not known to us | No (git history can show it, if you use git) | Not checked |
+| Secrets in memory while open | Kept in one locked region: never swapped, excluded from core dumps, wiped on lock and exit; checked by a test that scans the process memory | Blocks debugging and core dumps, zeroes memory it frees; maintainers say memory managed by Qt cannot be locked, and a 2024 report (CVE-2024-33901, disputed) recovered passwords from a memory dump | Secrets pass through shell variables, pipes and `gpg-agent`, which caches your key passphrase | Runs on Node.js, whose memory management does not allow secrets to be reliably wiped |
+| Saves survive a crash or power cut | Atomic saves, 5 backups, tested with simulated power loss | Has safe-save and backup options; how they were tested not checked | Ordinary file writes; git history helps you recover | The server holds the authoritative copy |
+| Clipboard | Cleared after 10 s (only if it still holds the copy); flagged to stay out of clipboard history | Cleared after a configurable timeout; details not checked | Restored to its previous content after 45 s | Not checked |
+| Password generator | Exactly uniform (proven and tested); shows bits | Shows entropy; uniformity not checked | Reads `/dev/urandom`; uniformity not checked | Yes; uniformity not checked |
+| Platforms | Linux only | Linux, Windows, macOS | Linux, macOS, BSD | Linux, Windows, macOS |
+| Open the vault in other apps | **No**: pwv's own format, and no export | **Yes**: many KeePass-compatible apps on every platform | Yes: any GnuPG tool reads each file | Export to several formats |
+| Independent security review | **None yet** | Independent review in 2023 (positive) | None known to us (a very small script on top of GnuPG, which is widely scrutinised) | Regular third-party audits published |
+| Years of real-world use | **None** | About ten | More than ten | About ten |
+
+### Where pwv is stronger
+
+- **Protecting secrets in memory.** This is pwv's main difference. While
+  the vault is open, every secret sits in one memory region that is
+  locked (never written to swap), left out of core dumps, and wiped when
+  you lock or quit; a test plants known values and scans the running
+  program's memory to check that none leak. KeePassXC's maintainers
+  describe its protection as keeping other programs out rather than
+  keeping secrets out of ordinary memory, and accept that decrypted data
+  can remain readable to someone who already has your user rights. Note
+  that pwv cannot stop such an attacker either (see [What pwv cannot
+  protect against](#what-pwv-cannot-protect-against)); it limits what
+  is left behind afterwards: in swap, in crash dumps, or in memory after
+  the vault is locked.
+- **Rollback warning.** If someone replaces your vault with an older copy
+  (for example through a sync folder), pwv notices and asks before
+  opening it. We know of no such check in the other three.
+- **A harder-to-guess vault by default.** pwv's default password hashing
+  uses 256 MiB of memory per guess, against 64 MiB (KeePassXC) and 32 MiB
+  or PBKDF2 (Bitwarden). That makes each guess against a stolen vault
+  more expensive. KeePassXC lets you raise its setting; its own 2023
+  reviewer recommended stronger defaults.
+- **Names and size stay private.** Unlike `pass`, nobody with your files
+  can see which sites you have accounts for, and pwv pads the vault so
+  its size does not reveal how many entries you have.
+- **Tested durability and testing depth.** pwv's saves are tested under
+  simulated power loss, and its code is checked by mutation testing (the
+  tests must catch deliberately planted bugs), memory-error detectors,
+  fuzzing and over 96 % line coverage. Whether the other projects do the
+  same is **not known to us**: we did not review their test suites.
+- **Verifiable releases.** Release files are built reproducibly (two
+  builds must be identical) and signed by GitHub's build system, so you
+  can check where a download came from. Whether the others' releases are
+  reproducible was **not checked**; KeePassXC signs its releases with
+  GnuPG (how the others sign theirs was not checked).
+- **Small and offline.** One binary, no network code, no account, no
+  helper processes. The code is small enough to be reviewed in full.
+
+### Where pwv is weaker
+
+- **No independent review and no track record.** The other three have had
+  outside reviews or years of use by many people who report bugs. pwv
+  has neither yet. It has one maintainer and was written with the help of
+  an AI coding assistant; its tests are thorough, but they were written
+  by the same project, so they share its blind spots. **This is the most
+  important difference today.** Until pwv has been reviewed and used for
+  a while, consider keeping your existing password manager alongside it.
+- **Password only.** KeePassXC can require a key file or a YubiKey as
+  well, so a stolen file plus a guessed password is not enough. pwv
+  relies on the master password alone (which is why it suggests a
+  generated six-word passphrase and uses expensive hashing).
+- **Your data is tied to pwv.** The vault format is pwv's own, only pwv
+  opens it, only on Linux, and there is deliberately no plain-text
+  export. KeePassXC's files open in many apps on every platform. If pwv
+  stopped being maintained, you would need to build it yourself to get
+  your data out.
+- **Less history.** pwv keeps the five previous versions of the whole
+  vault, not a history per entry as KeePassXC does.
+- **One machine at a time.** You can copy or sync the vault file, but pwv
+  cannot merge changes made on two machines. If both copies are edited,
+  whichever file your sync keeps wins and the other machine's changes
+  are lost. pwv warns only when a vault is older than one it saved
+  itself, which does not cover every such case.
+- **Linux and the terminal only.** No Windows, macOS, phone or graphical
+  version.
+
+### Which should you choose?
+
+- **You want the most protection for secrets in memory and on disk, use
+  only Linux and the terminal, and accept a new, unaudited tool:** pwv.
+- **You want a mature, audited local vault, a second factor (key file or
+  YubiKey), or other platforms:** KeePassXC.
+- **You want git-based history and sharing through GnuPG, and don't mind
+  entry names being visible:** `pass`.
+- **You want sync across devices and are happy with a server:** Bitwarden.
+
+### Sources
+
+- KeePassXC: [audit report (2023)](https://keepassxc.org/blog/2023-04-15-audit-report/),
+  [the review itself](https://keepassxc.org/assets/pdf/KeePassXC-Review-V1-Molotnikov.pdf),
+  [user guide](https://keepassxc.org/docs/KeePassXC_UserGuide),
+  [default settings (issue 7396)](https://github.com/keepassxreboot/keepassxc/issues/7396),
+  memory protection ([issue 2718](https://github.com/keepassxreboot/keepassxc/issues/2718),
+  [issue 7335](https://github.com/keepassxreboot/keepassxc/issues/7335),
+  [issue 10784](https://github.com/keepassxreboot/keepassxc/issues/10784)),
+  [CVE-2024-33901](https://nvd.nist.gov/vuln/detail/cve-2024-33901).
+- pass: [project page](https://git.zx2c4.com/password-store/about/),
+  [manual](https://www.mankier.com/1/pass).
+- Bitwarden: [key derivation](https://bitwarden.com/help/kdf-algorithms/),
+  [security whitepaper](https://bitwarden.com/help/bitwarden-security-white-paper/).
+- Privacy of local managers: [BSI study, 2025](https://cyberinsider.com/bsi-finds-security-and-privacy-gaps-in-popular-password-managers/).
 
 ## Building from source
 
@@ -295,8 +435,17 @@ sh scripts/release_build.sh dist
 ```
 
 The test suite, the full list of checks CI runs, and the release procedure
-are in [`DEVELOPMENT.md`](DEVELOPMENT.md). The vault file format is
-specified in [`FORMAT.md`](FORMAT.md).
+are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md); the full design, with the
+reasoning behind it, is in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md).
+
+## Contributing
+
+Bug reports, fixes, tests, documentation and security reviews are welcome.
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) first: it explains what
+kinds of change fit pwv, the security rules every change must follow, and
+how pull requests are reviewed. Report vulnerabilities privately, as
+described in [`SECURITY.md`](SECURITY.md), never in a public issue. The vault file format is
+specified in [`docs/FORMAT.md`](docs/FORMAT.md).
 
 ## Verifying a release
 

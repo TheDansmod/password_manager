@@ -3329,3 +3329,18 @@ files are byte-identical to cargo's result; `v0.1.0`, `0.1`, `01.0.0` and
 an empty argument are refused with nothing changed; on CRLF copies the
 endings are kept and exactly one line per file changes. CI's `--locked`
 remains the guard. `DEVELOPMENT.md`, "Releasing", step 2 uses it.
+
+### Addendum (2026-11-18): README comparison with other managers
+
+Owner's request: an honest comparison for users, only on features pwv
+has, with "not checked" / "not known to us" wherever a property of
+another tool was not confirmed (never stated as absent). New README
+section "How pwv compares" (KeePassXC, pass, Bitwarden CLI): table, where
+pwv is stronger, where it is weaker (no independent review or track
+record, one maintainer with an AI coding assistant, password only, own
+format with no export, no per-entry history, no merge across machines,
+Linux only), and which to choose. Facts about the others come from web
+searches on 2026-11-18 (sources listed in the section); direct page
+fetches were refused by the sandbox proxy, so each claim rests on the
+search summaries of those pages. The status note now says pwv is not yet
+audited; the memory bullet no longer reads as a guarantee.

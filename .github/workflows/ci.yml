@@ -49,6 +49,8 @@
 # M9 (2026-11-18, owner): badges also from nightly and "Run workflow" runs
 # on `main` (test IDs from full runs only); T-MUT-1 from mutants.yml's
 # latest run.
+# Later the same day: push runs on `main` only, superseded PR runs
+# cancelled, and the `ci-ok` gate job for branch protection.
 # Runners are pinned to ubuntu-26.04 (moved from 24.04 on 2026-11-11 with
 # no functional change in the same round). Each job's timeout-minutes is
 # about 3x its runtime measured on ubuntu-26.04 (floor 10 min), so a stall
@@ -66,12 +68,24 @@ name: ci
 # button (workflow_dispatch) run every job. Nightly-only jobs carry
 # `if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}`.
 # The definition of done (spec 16) is two consecutive green nightly runs.
+# Owner, 2026-11-18: push runs only on `main` (a branch with a pull request
+# was tested twice: its push run and the PR's merge-commit run). Branches
+# get CI by opening a (draft) pull request; tags get `release.yml` only.
 on:
   push:
+    branches: [main]
   pull_request:
   schedule:
     - cron: "17 4 * * *" # nightly: every job (and `supply`'s new advisories)
   workflow_dispatch: # "run now": every job, as nightly
+
+# A new push to a pull request cancels that pull request's older run (owner,
+# 2026-11-18). Every other run gets a group of its own (its run id), so runs
+# on `main`, nightly and manual runs are never cancelled or queued behind
+# one another (a shared group would also drop a waiting run).
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -425,7 +439,7 @@ jobs:
       # x86_64), and libFuzzer's -rss_limit_mb counts them, so a target that
       # allocates per input (fuzz_body's output buffer) hits the 256 MiB limit
       # without any leak. Cap the quarantine; -malloc_limit_mb still enforces
-      # "no allocation above 64 MiB". DESIGN_NOTES.md, 2026-11-11.
+      # "no allocation above 64 MiB". docs/DESIGN_NOTES.md, 2026-11-11.
       ASAN_OPTIONS: quarantine_size_mb=32:detect_leaks=1
     strategy:
       fail-fast: false
@@ -857,7 +871,7 @@ jobs:
 
   coredump:
     # T-MEM-5, "no core file and no coredumpctl entry", on the host the owner
-    # decision assumes (DESIGN_NOTES.md: suid_dumpable = 0) with
+    # decision assumes (docs/DESIGN_NOTES.md: suid_dumpable = 0) with
     # systemd-coredump as the piped core_pattern. A positive control first
     # proves that a crash of a dumpable process does produce an entry here,
     # so the negative check is not vacuous.
@@ -1220,7 +1234,7 @@ jobs:
           mkdir -p out
           status=0
           python3 -I scripts/coverage_report.py --runs runs/coverage --branch-runs runs/branch \
-            --baseline coverage/baseline.json --notes DESIGN_NOTES.md --jobs needs.json \
+            --baseline coverage/baseline.json --notes docs/DESIGN_NOTES.md --jobs needs.json \
             --summary "$GITHUB_STEP_SUMMARY" --merged-lcov out/merged.lcov \
             --new-baseline out/baseline-candidate.json --badges out/badges \
             --mutants mutants.json --logs $(find logs -name '*.txt') || status=$?
@@ -1257,3 +1271,46 @@ jobs:
           git push -q --force "$repo" badges
       - name: Gates
         run: exit "${COVERAGE_STATUS:-1}"
+
+  ci-ok:
+    # The one status check branch protection requires (owner, 2026-11-18):
+    # it waits for every job and fails if any of them failed, was cancelled
+    # or timed out. Skipped is accepted: on pushes and pull requests the
+    # nightly-only jobs are skipped by their `if:`. Requiring this job
+    # instead of each job by name means the ruleset survives renames and
+    # matrix changes. Needs no permissions and no checkout. Cap 10 (floor).
+    needs:
+      - lint
+      - test
+      - release-check
+      - e2e
+      - compat
+      - fuzz-smoke
+      - sanitizers
+      - sanitizers-asan
+      - test-arm64
+      - durability
+      - perf
+      - coredump
+      - supply
+      - coverage
+      - coverage-branch
+      - fuzz-long
+      - coverage-report
+    if: ${{ always() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Every job passed (or was skipped as nightly-only)
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$NEEDS" | python3 -I -c '
+          import json, sys
+          bad = 0
+          for job, v in sorted(json.load(sys.stdin).items()):
+              r = v.get("result")
+              print(f"{job}: {r}")
+              bad += r not in ("success", "skipped")
+          sys.exit(1 if bad else 0)'

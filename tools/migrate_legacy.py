@@ -6,7 +6,7 @@
 The legacy vault is JSON, `{entry: {key: value}}`, encrypted by GnuPG with
 a passphrase. This script lets `gpg` decrypt it (gpg asks for the legacy
 passphrase on the terminal; the passphrase never enters this process),
-validates the structure, and writes a canonical pwv body (FORMAT.md,
+validates the structure, and writes a canonical pwv body (docs/FORMAT.md,
 Section 3) to the pipe. `pwv import` validates that body again with its
 strict parser, and asks for the master password only after this script
 has finished.
@@ -33,7 +33,7 @@ import sys
 # after folding A-Z only, as pwv does.
 SENSITIVE = {b"password", b"passphrase", b"pin", b"secret", b"otp", b"totp", b"cvv",
              b"token", b"api key", b"recovery codes"}
-# Unicode White_Space, as Rust's char::is_whitespace (FORMAT.md).
+# Unicode White_Space, as Rust's char::is_whitespace (docs/FORMAT.md).
 WHITE = set(map(chr, [*range(9, 14), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
                       0x2028, 0x2029, 0x202F, 0x205F, 0x3000]))
 MAX_ENTRIES, MAX_NAME, MAX_FIELDS, MAX_KEY, MAX_VALUE, BLOCK = 10_000, 256, 64, 64, 4096, 4096

@@ -13,7 +13,7 @@ unmaintained = "all"
 ignore = [
     # pin-utils 0.1.1 is unmaintained (archived upstream); no vulnerability.
     # Dev-only: expectrl 0.9.0 (latest; PTY test harness) -> nix 0.26.4.
-    # Not linked into the pwv binary. DESIGN_NOTES.md 2026-11-10; revisit in M7.
+    # Not linked into the pwv binary. docs/DESIGN_NOTES.md 2026-11-10; revisit in M7.
     { id = "RUSTSEC-2026-0441", reason = "dev-only via expectrl->nix; unmaintained, not vulnerable" },
 ]
 
@@ -40,13 +40,13 @@ unused-allowed-license = "allow"
 multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
-# Every skip is justified, with a date, in DESIGN_NOTES.md.
+# Every skip is justified, with a date, in docs/DESIGN_NOTES.md.
 skip = [
     # Transitive only, inside arboard's Wayland backend: petgraph 0.8.3 needs
     # hashbrown ^0.15, while indexmap >= 2.13 (forced graph-wide by the dev-only
-    # proptest -> bit-vec -> borsh chain) uses 0.17. See DESIGN_NOTES.md,
+    # proptest -> bit-vec -> borsh chain) uses 0.17. See docs/DESIGN_NOTES.md,
     # 2026-11-10. Remove when petgraph moves to hashbrown 0.17.
-    { crate = "hashbrown@0.15.5", reason = "petgraph 0.8.3 pin; DESIGN_NOTES.md 2026-11-10" },
+    { crate = "hashbrown@0.15.5", reason = "petgraph 0.8.3 pin; docs/DESIGN_NOTES.md 2026-11-10" },
 ]
 
 [sources]

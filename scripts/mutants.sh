@@ -13,7 +13,7 @@
 #
 # A weaker first pass can only add survivors, which the full suite then
 # judges, so nothing is skipped. What survives pass 3 is written to
-# OUT/survivors.txt; each must be justified in DESIGN_NOTES.md
+# OUT/survivors.txt; each must be justified in docs/DESIGN_NOTES.md
 # (scripts/mutants_check.py). Timeouts in pass 3 count as caught: the
 # mutant made the suite hang, which a run notices.
 #

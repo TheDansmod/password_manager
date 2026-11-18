@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """T-MUT-1 gate (spec 14.11; M9): every mutant that survived the full suite
 (scripts/mutants.sh writes them to survivors.txt) must be justified in
-DESIGN_NOTES.md, in a table under a heading containing "Surviving mutants",
+docs/DESIGN_NOTES.md, in a table under a heading containing "Surviving mutants",
 one row per mutant with its exact cargo-mutants name in backticks:
 
   | `src/store.rs:466:9: delete fsync in save` | 2026-11-20 | reason |
 
-Usage: mutants_check.py DESIGN_NOTES.md SURVIVORS.txt...
+Usage: mutants_check.py docs/DESIGN_NOTES.md SURVIVORS.txt...
 Exit 1 if any survivor is not justified.
 """
 

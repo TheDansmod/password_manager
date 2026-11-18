@@ -7,7 +7,7 @@
 #
 # Note: clippy.toml cannot set lint levels, so the `clippy::pedantic` set and
 # the deny list of spec Section 15.1 are enabled by crate attributes in
-# src/lib.rs and src/main.rs (see DESIGN_NOTES.md).
+# src/lib.rs and src/main.rs (see docs/DESIGN_NOTES.md).
 
 msrv = "1.99"
 

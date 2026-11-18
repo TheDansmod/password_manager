@@ -27,7 +27,7 @@ spans, and test names.
 
 Usage:
   coverage_report.py --runs DIR [--branch-runs DIR] [--baseline FILE]
-      [--notes DESIGN_NOTES.md] [--logs FILE...] [--jobs needs.json]
+      [--notes docs/DESIGN_NOTES.md] [--logs FILE...] [--jobs needs.json]
       [--summary OUT.md] [--merged-lcov OUT] [--new-baseline OUT.json]
       [--badges DIR] [--mutants FILE]
   coverage_report.py --self-test
