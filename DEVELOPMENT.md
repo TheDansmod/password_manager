@@ -96,14 +96,15 @@ Below, `X` is the version without the `v` (for example `0.1.0`, or
 2. **Set the version** (on `main`, or on a branch merged to `main`):
 
    ```sh
-   sed -i 's/^version = ".*"$/version = "X"/' Cargo.toml   # first `version =` line is the package's
-   cargo update -p pwv --offline                           # Cargo.lock
-   (cd fuzz && cargo update -p pwv --offline)              # fuzz/Cargo.lock
-   git diff --stat                                         # exactly these three files
+   sh scripts/set_version.sh X     # Cargo.toml, Cargo.lock, fuzz/Cargo.lock
+   git diff --stat                 # exactly these three files, one line each
    ```
 
-   CI builds with `--locked`, so both lock files must be updated with the
-   version. For a real release (not a rehearsal), also update
+   The script needs only `sh` and `awk`: no Rust toolchain, no network, no
+   build. CI builds with `--locked`, so it fails if a lock file disagrees
+   with `Cargo.toml`. (`cargo update -p pwv` does the same edit but needs
+   the crate index; `--offline` fails on a machine that never built pwv.)
+   For a real release (not a rehearsal), also update
    `SECURITY.md`'s "Supported versions". Commit, push, and wait for the
    push run to be green.
 3. **Mutation testing on that commit.** Unless the latest `mutants.yml` run

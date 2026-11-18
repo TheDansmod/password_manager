@@ -3315,3 +3315,17 @@ metadata --locked` accepts both.
 `src/` and `tests/` unchanged. Local checks: `coverage_report.py
 --self-test`, `test_ids.py --check` (81 IDs), all four workflows parse
 (PyYAML 6.0.2), `sh -n scripts/mutants.sh`.
+
+### Addendum (2026-11-18): version bumps without cargo
+
+The owner's host has the repository but no cargo cache, so `cargo update
+-p pwv --offline` failed ("no matching package named `const-oid`": the
+offline index is empty). The owner prefers releases without local builds.
+New `scripts/set_version.sh X` (POSIX sh and awk) edits the three lines
+`cargo update -p pwv` would: `[package]` `version` in `Cargo.toml`, and
+pwv's `version` in `Cargo.lock` and `fuzz/Cargo.lock` (a path package: no
+checksum, no source line). Checked locally: for `0.1.0-rc.1` all three
+files are byte-identical to cargo's result; `v0.1.0`, `0.1`, `01.0.0` and
+an empty argument are refused with nothing changed; on CRLF copies the
+endings are kept and exactly one line per file changes. CI's `--locked`
+remains the guard. `DEVELOPMENT.md`, "Releasing", step 2 uses it.
