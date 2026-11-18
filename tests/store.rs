@@ -1155,6 +1155,81 @@ fn state_file_damage_and_permissions_refused() {
 
 // ------------------------------------------------------------ T-STORE-6
 
+/// The state file's 1 MiB limit refuses, it never truncates: a cut at the
+/// limit would drop the rows after it, this vault's among them, and with
+/// them rollback detection. A well-formed file of exactly 1 MiB is read
+/// whole; the same rows behind one more are refused.
+#[test]
+fn state_file_limit_refuses_and_never_truncates() {
+    const LIMIT: usize = 1 << 20;
+    let f = fx();
+    let (kek, _) = create_vault(&f.paths, 2);
+    let good = String::from_utf8(fs::read(&f.paths.state).unwrap()).unwrap();
+    let id = good.split(' ').next().unwrap().to_owned();
+    // 64-byte rows (generations zero-padded to 30 digits) fill the limit
+    // exactly; this vault's row, recording a newer generation, comes last.
+    let row = |id: &str, g: u64| format!("{id} {g:030}\n");
+    let filler = |n: usize| -> String {
+        (1..)
+            .map(|i: u32| format!("{i:032x}"))
+            .filter(|other| *other != id)
+            .take(n)
+            .map(|other| row(&other, 1))
+            .collect()
+    };
+    let last = row(&id, 3);
+    let whole = filler(LIMIT / last.len() - 1) + &last;
+    assert_eq!(whole.len(), LIMIT);
+    overwrite(&f.paths.state, whole.as_bytes());
+    with_session(&f.paths, &kek, |st, h, _, _| {
+        let fr = st.freshness(h).unwrap();
+        assert_eq!(
+            fr,
+            Freshness::RolledBack {
+                file: 2,
+                recorded: 3
+            },
+            "the last row of a 1 MiB file is read"
+        );
+    });
+    let over = filler(LIMIT / last.len()) + &last;
+    assert_eq!(over.len(), LIMIT + last.len());
+    overwrite(&f.paths.state, over.as_bytes());
+    with_session(&f.paths, &kek, |st, h, _, _| {
+        assert_eq!(st.freshness(h).unwrap_err(), Error::State);
+    });
+}
+
+/// Open compares the file's length with its header before allocating
+/// (Section 8.2): a vault cut short, or grown by one byte, is refused with
+/// the error that describes it (shorter than a header, or a length that
+/// does not match the header), and left as it was.
+#[test]
+fn open_refuses_a_vault_whose_length_does_not_match_its_header() {
+    use pwv::format::{Error as F, HEADER_LEN};
+    let f = fx();
+    let (_, files) = create_vault(&f.paths, 1);
+    let good = &files[0];
+    let longer = [good.as_slice(), &[0]].concat();
+    let cases: [(&[u8], F); 7] = [
+        (&[], F::HeaderLength),
+        (&good[..1], F::HeaderLength),
+        (&good[..HEADER_LEN - 1], F::HeaderLength),
+        (&good[..HEADER_LEN], F::FileLength),
+        (&good[..HEADER_LEN + 1], F::FileLength),
+        (&good[..good.len() - 1], F::FileLength),
+        (&longer, F::FileLength),
+    ];
+    for (bytes, want) in cases {
+        overwrite(&f.paths.vault, bytes);
+        let got = open(f.paths.clone(), false).err();
+        assert_eq!(got, Some(Error::Format(want)), "{} bytes", bytes.len());
+        assert_eq!(fs::read(&f.paths.vault).unwrap(), bytes);
+    }
+    overwrite(&f.paths.vault, good);
+    assert_eq!(&open(f.paths.clone(), false).unwrap().1, good);
+}
+
 #[test]
 fn t_store_6_stale_temp_files_removed() {
     let f = fx();
@@ -1252,6 +1327,22 @@ fn purge_backups_deletes_exactly_the_backups() {
     st.purge_backups().unwrap();
     st.save(&files[6]).unwrap();
     assert_eq!(f.names(), ["vault.pwv", "vault.pwv.1", "vault.pwv.lock"]);
+}
+
+/// A backup that cannot be deleted is reported, not passed over (`passwd
+/// --purge-backups` then says the deletion failed): here `.3` is a
+/// directory, which `unlink` refuses (`EISDIR`, for root too). The vault
+/// itself is untouched.
+#[test]
+fn purge_backups_reports_a_backup_it_cannot_delete() {
+    let f = fx();
+    let (_, files) = create_vault(&f.paths, 7);
+    let (st, _) = Store::open(f.paths.clone(), false).unwrap();
+    fs::remove_file(f.at("vault.pwv.3")).unwrap();
+    fs::create_dir(f.at("vault.pwv.3")).unwrap();
+    assert_eq!(st.purge_backups(), Err(Error::Io));
+    assert!(f.at("vault.pwv.3").is_dir());
+    assert_eq!(fs::read(&f.paths.vault).unwrap(), files[6]);
 }
 
 // ------------------------------------------------------------ T-STORE-9

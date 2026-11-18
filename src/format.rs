@@ -566,9 +566,10 @@ pub fn parse_body(body: &[u8]) -> Result<Entries<'_>, Error> {
     let mut prev: Option<&[u8]> = None;
     for i in 0..count {
         let e = read_entry(&mut r, i)?;
-        if let Some(p) = prev {
-            ensure(p != e.name, Error::NameDuplicate(i))?;
-            ensure(p < e.name, Error::NameOrder(i))?;
+        match prev.map(|p| p.cmp(e.name)) {
+            None | Some(core::cmp::Ordering::Less) => {}
+            Some(core::cmp::Ordering::Equal) => return Err(Error::NameDuplicate(i)),
+            Some(core::cmp::Ordering::Greater) => return Err(Error::NameOrder(i)),
         }
         prev = Some(e.name);
     }

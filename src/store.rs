@@ -700,6 +700,30 @@ mod tests {
         v
     }
 
+    /// A crash at "partial write" must leave what the name says, a torn
+    /// write: one temporary file holding a non-empty strict prefix of the
+    /// file being written (the copy to `.1`, the vault, or the state).
+    /// Otherwise that case would only repeat the crash at "create temp".
+    fn assert_torn(p: &Paths, prior: u64, ctx: &str) {
+        let state = format!("{} {}\n", "07".repeat(16), prior + 1).into_bytes();
+        let whole = [file(prior), file(prior + 1), state];
+        let mut temps = Vec::new();
+        for dir in [p.vault.parent().unwrap(), p.state.parent().unwrap()] {
+            for n in names(dir).into_iter().filter(|n| n.contains(".tmp.")) {
+                temps.push(fs::read(dir.join(n)).unwrap());
+            }
+        }
+        assert_eq!(temps.len(), 1, "{ctx}: temporary files");
+        let t = &temps[0];
+        assert!(
+            whole
+                .iter()
+                .any(|w| !t.is_empty() && t.len() < w.len() && w.starts_with(t)),
+            "{ctx}: {} bytes are not a torn write",
+            t.len()
+        );
+    }
+
     #[test]
     fn t_store_2_crash_at_every_step() {
         for (prior, fail_link) in [(1, false), (2, false), (7, false), (2, true), (7, true)] {
@@ -740,6 +764,9 @@ mod tests {
                     });
                     let crashed = catch_unwind(AssertUnwindSafe(move || hk.save(&file(prior + 1))));
                     assert!(crashed.is_err(), "{ctx}: no crash: {:?}", crashed.ok());
+                    if *point == "partial write" {
+                        assert_torn(&p, prior, &ctx);
+                    }
 
                     // Restart: open never fails and yields exactly old or new.
                     let got;
@@ -819,6 +846,41 @@ mod tests {
         let mut n = names(vdir);
         n.sort();
         assert_eq!(n.len(), 7, "{n:?}");
+    }
+
+    /// The copy fallback reads the current vault into memory, but never
+    /// more than the largest valid vault (Section 7: header, at most 16 MiB
+    /// of payload, tag). A current file of that size is copied; one that
+    /// has grown past it while the session was open cannot be a vault and
+    /// is refused before anything is written, not read whole.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test grows the vault behind the store's back"
+    )]
+    fn copy_fallback_reads_at_most_the_largest_vault() {
+        let largest = HEADER_LEN + format::MAX_PAYLOAD + format::TAG_LEN;
+        for (size, copied) in [(largest, true), (largest + 1, false)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let p = paths(tmp.path());
+            setup(&p, 1);
+            let (st, _) = Store::open(p.clone(), false).unwrap();
+            let size = u64::try_from(size).unwrap();
+            let grown = fs::OpenOptions::new().write(true).open(&p.vault).unwrap();
+            grown.set_len(size).unwrap();
+            let mut st = hooked(st, |pt| pt == "link");
+            let backup = p.vault.with_extension("pwv.1");
+            let saved = st.save(&file(2));
+            if copied {
+                saved.unwrap();
+                assert_eq!(fs::metadata(&backup).unwrap().len(), size);
+                assert_eq!(fs::read(&p.vault).unwrap(), file(2));
+            } else {
+                assert_eq!(saved, Err(format::Error::FileLength.into()), "{size}");
+                assert!(!backup.exists(), "a backup was written");
+                assert_eq!(fs::metadata(&p.vault).unwrap().len(), size);
+            }
+        }
     }
 
     #[test]

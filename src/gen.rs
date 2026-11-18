@@ -419,3 +419,32 @@ pub fn log2_count(sizes: &[u32], len: u32) -> Option<f64> {
     })?;
     Some(f64::from(len) * n.log2() + f64::log2(p))
 }
+
+/// Unit tests of the private offset table.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The offset table starts every word of the list. The compiler builds
+    /// it; built again at run time by the same `const fn` (the only way a
+    /// coverage run sees that code), it must equal both the compiled table
+    /// and the word starts of an independent split of the list.
+    #[test]
+    fn offsets_start_every_word_of_the_list() {
+        let mut starts = Vec::new();
+        let mut at = 0;
+        for w in WORDS.split_terminator('\n') {
+            starts.push(u32::try_from(at).unwrap());
+            at += w.len() + 1;
+        }
+        // 205,690 offsets (800 KiB) are returned by value: a large stack.
+        let built = std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| offsets().to_vec())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(built, starts);
+        assert_eq!(built, OFFSETS.to_vec());
+    }
+}

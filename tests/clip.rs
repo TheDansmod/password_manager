@@ -14,6 +14,43 @@ mod common;
 #[global_allocator]
 static GLOBAL: pwv::alloc::ZeroizingAlloc = pwv::alloc::ZeroizingAlloc::new(true);
 
+/// `copy` refuses a value it cannot serve before it touches the
+/// clipboard: text that is not UTF-8, and a value longer than the 1 KiB
+/// `Clip` slot (field values may be up to 4 KiB). The slot is left empty,
+/// and every error has a fixed, printable message of its own. Runs in every
+/// build, with or without a display.
+#[test]
+fn copy_refuses_values_it_cannot_serve() {
+    use pwv::clip::{Clip, Error};
+    let mut a = common::vaults::arena();
+    let mut s = a.slots().expect("slots");
+    let too_long = vec![b'a'; s.clip.capacity() + 1];
+    let mut clip = Clip::default();
+    for (value, want) in [
+        (&b"\xff\xfe"[..], Error::Utf8),
+        (&too_long[..], Error::Capacity),
+    ] {
+        common::vaults::put(&mut s.clip, b"stale");
+        assert_eq!(clip.copy(value, &mut s.clip), Err(want));
+        assert!(s.clip.is_empty(), "{want:?}: slot not cleared");
+    }
+    let all = [
+        Error::Unsupported,
+        Error::Unavailable,
+        Error::Utf8,
+        Error::Capacity,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in all {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+}
+
 #[cfg(feature = "clipboard")]
 mod x11 {
     use super::common;
@@ -223,6 +260,44 @@ mod x11 {
         p.send("quit\n");
         assert_eq!(p.exit_code(), Some(0));
         assert!(clipboard_is("other client"), "cleared at exit");
+    }
+
+    /// Review finding R-09 (Section 11.3 step 3): a clipboard that another
+    /// client holds in a format other than text demonstrably does not hold
+    /// our value, and is left alone at the deadline and at exit (T-CLIP-3
+    /// covers foreign text).
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests spawn children; Section 5.7 binds the binary only"
+    )]
+    fn a_foreign_non_text_clipboard_is_not_cleared() {
+        if !display() {
+            return;
+        }
+        let _x = turn();
+        let home = seeded();
+        let mut p = open(&home, &["--clip-timeout", "5"]);
+        p.send("copy site\n");
+        assert!(p.expect("Copied. Clearing in 5 s."));
+        assert!(clipboard_is(SECRET));
+        // `xclip -t image/png` offers that target only and refuses text.
+        let mut other = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'not text' | xclip -i -selection clipboard -t image/png",
+            ])
+            .spawn()
+            .expect("xclip -i");
+        assert!(other.wait().expect("xclip -i").success());
+        let image = || xclip_out("image/png").is_some_and(|v| v == b"not text");
+        assert!(image(), "the other client owns the clipboard");
+        assert!(xclip_out("UTF8_STRING").is_none(), "no text on offer");
+        std::thread::sleep(Duration::from_secs(7));
+        assert!(image(), "a foreign image was cleared at the deadline");
+        p.send("quit\n");
+        assert_eq!(p.exit_code(), Some(0));
+        assert!(image(), "a foreign image was cleared at exit");
     }
 
     /// What the mock clipboard manager saw.

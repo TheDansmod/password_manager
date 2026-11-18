@@ -69,13 +69,24 @@ echo "pass 1: $(wc -l < "$out/fast-survivors.txt") survivors"
 
 # Passes 2 and 3 re-run exactly those mutants: every other mutant of the
 # file is marked as already caught, and --iterate skips them.
+# `--colors never`: the workflow sets CARGO_TERM_COLOR=always, which
+# cargo-mutants also reads; the list then carries ANSI escapes inside the
+# names, matches no survivor, and passes 2 and 3 re-test every mutant
+# against the full suite (the first weekly run: four jobs cancelled at the
+# time limit).
 # shellcheck disable=SC2086
-cargo mutants $common --list > "$out/all.txt"
+cargo mutants $common --colors never --list > "$out/all.txt"
 full() { # full PASS_NAME INPUT_LIST [cargo-mutants args...]
   name=$1
   list=$2
   shift 2
   mkdir -p "$out/$name/mutants.out"
+  # Every survivor must be a name of the list, or nothing would be skipped.
+  if missing=$(grep -vxF -f "$out/all.txt" "$list"); then
+    echo "survivors not in the mutant list (name format changed?):"
+    echo "$missing"
+    exit 1
+  fi
   grep -vxF -f "$list" "$out/all.txt" > "$out/$name/mutants.out/previously_caught.txt" || true
   if [ ! -s "$list" ]; then
     : > "$out/$name-survivors.txt"
