@@ -3690,6 +3690,52 @@ tests return at once without a display); `test_ids.py`; LOC budget.
 X11 tests themselves and the coverage figures; the next PR run is the
 first to execute them. CodeQL reruns on the push.
 
+## 2026-11-18 — CodeQL "hard-coded cryptographic value": the other alerts
+
+Triage of the twelve alerts (ten lines; 180 and 184 twice each) left after `ZERO_KEY` (line numbers as CodeQL
+reported them on the pushed tree):
+
+| Alert | Verdict | Action |
+|---|---|---|
+| `src/vault.rs:134` `salt: [0; 32]` (`keyslot`) | Not a defect: `fill_random(&mut h.salt)?` overwrote it before `derive_kek` saw it, and a generator failure returned first. The query cannot see a write through `&mut`. | Changed anyway: `salt: crypto::random()?`. |
+| `src/crypto.rs:285` `let mut nonce = [0u8; NONCE_LEN]` (`wrap_dek`) | Not a defect, the same pattern. | `let nonce: [u8; NONCE_LEN] = random()?;` |
+| `tests/crypto.rs` 58, 171, 180, 184, 212, 244, 479 (now 495) | Intended: fixed inputs keep the tests deterministic. 171 is a 31-byte key that `wrap_dek` must refuse; 479 is a wrong KEK that must fail; the rest are fixed keys and salts for KDF, seal and open checks. Random values would only make failures irreproducible. | None in code; dismiss as "Used in tests". |
+| `fuzz/fuzz_targets/fuzz_open.rs:60` `&[0x4b; 32]` | Intended: a fixed KEK keeps fuzz runs and crash reproductions deterministic. | None in code; dismiss as "Used in tests". |
+
+**`crypto::random::<N>()`.** Returns a fresh array from
+`getrandom::fill_uninit` on a `MaybeUninit` buffer, converted with the
+safe `<[u8; N]>::try_from`, so no constant array ever exists. The
+alternative was dismissing the two `src` alerts, but the pattern "zeroed,
+then filled" is exactly what a missed fill would look like, so removing it
+is worth 15 lines. The chain `ok().and_then(..).ok_or(..)` has no
+closure that runs only on failure, so it adds no uncovered region to
+`crypto.rs` (regions are gated by T-COV-4 at 96.98 % − 0.5 pp). The
+payload nonce in `vault::save` uses it too (not flagged, the same
+pattern); the vault ID and the temporary-file suffix in `store` are not
+cryptographic inputs and keep `fill_random`.
+
+`vault.rs` keeps its line count (a comment replaces the removed fill), so
+the coverage exception `vault.rs:334` and the mutant rows `390:40` and
+`655:69` still hold (checked). `crypto.rs` lines after `fill_random` move down by 16 (15
+after `wrap_dek`);
+no current table cites a `crypto.rs` line (the `197:69` mentions are
+history).
+
+**Why the tests are not changed or excluded in configuration.** The
+repository uses CodeQL default setup (no workflow, no config file), which
+cannot exclude paths; an advanced-setup workflow with `paths-ignore` would
+add a pinned workflow to maintain for the test and fuzz alerts. Dismissing each
+with GitHub's "Used in tests" reason records the judgement where the
+alert lives.
+
+**Checked locally:** fmt; clippy in the five `--all-targets` configs and
+the fuzz targets; `cfg(miri)` compile checks for the lib (both) and
+`crypto`; full `cargo test --features memtest,testkdf`; `test_ids.py`;
+LOC budget (crypto + format 703/750, vault 491/500); cargo-mutants on
+`random` (both mutants, `Ok([0; N])` and `Ok([1; N])`, caught by
+`tests/crypto.rs`). **Not checked here:** whether CodeQL closes the two
+`src` alerts (it reruns on push).
+
 ## Changes to the owner's specification
 
 **Applied 2026-11-18 at the owner's request** to the owner's copy (kept

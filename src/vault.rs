@@ -131,14 +131,14 @@ fn keyslot(
         vault_id,
         kdf_m_kib: params.m_kib,
         kdf_t: params.t,
-        salt: [0; 32],
+        // Fresh per write, as the wrap nonce (`wrap_dek`) and DEK below.
+        salt: crypto::random()?,
         wrap_nonce: [0; 24],
         wrapped_dek: [0; 48],
         generation,
         payload_nonce: [0; 24],
         payload_len: 0,
     };
-    crypto::fill_random(&mut h.salt)?;
     dek.set_len(KEY_LEN).map_err(|_| crypto::Error::Length)?;
     let res = crypto::fill_random(dek.expose_mut())
         .and_then(|()| crypto::derive_kek(pw, &h.salt, params, kek, require_locked))
@@ -171,7 +171,7 @@ pub fn save(dek: &[u8], h: &mut Header, body: &mut [u8]) -> Result<Vec<u8>, Erro
     let mut n = h.clone();
     n.generation = n.generation.checked_add(1).ok_or(Error::Generation)?;
     n.payload_len = u32::try_from(body.len()).map_err(|_| Error::Capacity)?;
-    crypto::fill_random(&mut n.payload_nonce)?;
+    n.payload_nonce = crypto::random()?;
     let aad = n.encode();
     format::parse_header(&aad)?;
     let tag = crypto::seal(dek, &n.payload_nonce, &aad, body)?;

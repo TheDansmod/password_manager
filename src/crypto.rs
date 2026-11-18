@@ -133,6 +133,21 @@ pub fn fill_random(buf: &mut [u8]) -> Result<(), Error> {
     getrandom::fill(buf).map_err(|_| Error::Random)
 }
 
+/// `N` fresh bytes from `getrandom(2)`, for the public random values kept
+/// outside the arena (salts, nonces). The array is never a constant first:
+/// a zeroed buffer filled later reads, to a reviewer or a scanner (the
+/// "hard-coded cryptographic value" query), as a fixed salt or nonce.
+///
+/// # Errors
+/// [`Error::Random`] if the OS generator fails.
+pub fn random<const N: usize>() -> Result<[u8; N], Error> {
+    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); N];
+    getrandom::fill_uninit(&mut buf)
+        .ok()
+        .and_then(|b| <[u8; N]>::try_from(&*b).ok())
+        .ok_or(Error::Random)
+}
+
 /// Writes UTF8(NFC(`raw`)) into `out` (Section 6.2). Secret contract:
 /// reads `raw` (an arena slot) and writes only into `out`.
 ///
@@ -282,8 +297,7 @@ pub fn wrap_dek(
     dek: &[u8],
     aad_w: &[u8],
 ) -> Result<([u8; NONCE_LEN], [u8; WRAPPED_LEN]), Error> {
-    let mut nonce = [0u8; NONCE_LEN];
-    fill_random(&mut nonce)?;
+    let nonce: [u8; NONCE_LEN] = random()?;
     let mut w = [0u8; WRAPPED_LEN];
     let (ct, tag) = w.split_at_mut(KEY_LEN);
     if dek.len() != KEY_LEN {
