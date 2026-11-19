@@ -39,7 +39,7 @@
 # M9 (round 2): `coverage` (spec 14.13: five instrumented configurations,
 # every push), `coverage-branch` (T-COV-5, nightly), `coverage-report`
 # (merge, T-COV-1 .. T-COV-5, the job summary, artefacts, and the badges
-# from runs on `main`: the only job with `contents: write`), `fuzz-long`
+# from runs on `main`: the only ci.yml job with `contents: write`), `fuzz-long`
 # (30 min per target, corpus kept, T-COV-6), `perf` (T-PERF-1, nightly),
 # and T-STORE-8 (LazyFS) in `durability`. T-MUT-1 is the weekly
 # workflow mutants.yml.
@@ -1169,7 +1169,8 @@ jobs:
     # status (test logs of `test`, `e2e` and the coverage runs, plus the
     # result of each job named as evidence). Artefacts kept 30 days.
     # Waits for every job of the run (nightly ones are skipped on pushes).
-    # The only job with `contents: write` (spec 14.13; owner decision 3):
+    # The only ci.yml job with `contents: write` (spec 14.13; owner decision
+    # 3; the other is release.yml's `publish`, owner 2026-11-19):
     # it pushes two SVG badges to the orphan `badges` branch, only from runs
     # on `main` that no fork can start: pushes, the nightly schedule, and
     # "Run workflow" (owner, 2026-11-18; never on pull_request). The

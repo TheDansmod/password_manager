@@ -72,7 +72,7 @@ CI only (they need tools a typical development machine lacks):
 | `ci.yml` | nightly (04:17 UTC) and "Run workflow" | every job, including Miri, ASan, LazyFS, aarch64, branch coverage, long fuzzing, performance |
 | `mutants.yml` | weekly (Saturday 01:23 UTC) and "Run workflow" | T-MUT-1: 13 jobs, one per module shard; surviving mutants must be justified in `docs/DESIGN_NOTES.md` |
 | `ci.yml`, job `ci-ok` | every run, last | passes only if every other job passed or was skipped (nightly-only jobs on pushes and pull requests); the one status check branch protection requires |
-| `release.yml` | pushing a `v*` tag | calls `release-build.yml` |
+| `release.yml` | pushing a `v*` tag | `gate` (the commit is on `main`, has a green full `ci.yml` run, and a green `mutants.yml` run tested the same `src/` and `tests/`), then `release-build.yml`, then `publish`: a draft GitHub release with the attested files, checked byte for byte, then published (immutable) and verified as a user would |
 | `release-build.yml` | only when `release.yml` calls it | checks the tag against `Cargo.toml`'s version, builds twice (T-REPRO-1), checks T-ENG-7 and hardening, attests the files, keeps them as the artefact `pwv-release-<tag>` |
 
 **Badges.** `coverage-report` renders two SVGs and force-pushes them to
@@ -88,8 +88,12 @@ skips the nightly gates. T-MUT-1 counts the latest completed
 
 Release files are built only by CI, from a `v*` tag, and attested there.
 The tag must equal `v` + `Cargo.toml`'s version (`release-build.yml`
-fails otherwise). Nothing is published automatically: you create the
-GitHub release and attach the files yourself.
+fails otherwise). **Pushing the tag publishes the release**
+(`release.yml`, owner 2026-11-19): immutable releases are enabled, so
+once published, its files and its tag can never change. `release.yml`'s
+`gate` job refuses to build unless steps 1 to 3 below were done; it
+checks the commit, not your intent, so do not push a tag you are not
+ready to release.
 
 Below, `X` is the version without the `v` (for example `0.1.0`, or
 `0.1.0-rc.1` for a rehearsal).
@@ -110,11 +114,15 @@ Below, `X` is the version without the `v` (for example `0.1.0`, or
    For a real release (not a rehearsal), also update
    `SECURITY.md`'s "Supported versions". Commit, push, and wait for the
    push run to be green.
-3. **Mutation testing on that commit.** Unless the latest `mutants.yml` run
-   is newer than the last change to `src/`, start one and wait for it to
-   be green:
+3. **A full CI run and mutation testing on that commit.** `gate` requires
+   a green nightly or "Run workflow" `ci.yml` run of exactly the commit
+   you tag (a push run skips the nightly jobs), and a green `mutants.yml`
+   run on `main` whose commit has the same `src/` and `tests/` (the
+   version commit of step 2 changes neither, so an earlier run counts).
+   Start whichever is missing and wait for it to be green:
 
    ```sh
+   gh workflow run ci.yml --ref main
    gh workflow run mutants.yml --ref main
    gh run watch "$(gh run list --workflow=mutants.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
    ```
@@ -127,43 +135,43 @@ Below, `X` is the version without the `v` (for example `0.1.0`, or
    git push origin vX
    ```
 
-   This starts `release` (tags do not start `ci.yml`).
-5. **Download the files** once the `release` run is green:
+   This starts `release` (tags do not start `ci.yml`): `gate`, the
+   build and attestation, then `publish`, which creates a draft release
+   titled "pwv X" with generated notes, uploads
+   `pwv-X-x86_64-linux`, its two `.LICENSE` files, `SHA256SUMS` and
+   `pwv.sigstore.json`, checks the draft holds exactly those bytes,
+   publishes it (a pre-release if `X` has a hyphen, as `0.1.0-rc.1`),
+   and then verifies the published files as a user would (release
+   attestation, `sha256sum -c`, `gh attestation verify` with
+   `--signer-workflow`, the bundle offline).
+5. **If a run fails**, read which step. Before publication nothing is
+   final. If `gate` misses a run, start it (step 3), wait for it to be
+   green, and re-run the workflow. If `publish` fails before its
+   "Publish" step, re-run the failed jobs: a leftover draft is completed
+   and its stray files deleted. If the fix needs a code change, delete
+   the tag (`git push --delete origin vX && git tag -d vX`) and any draft
+   (`gh release delete vX`), then start again at step 1. After
+   publication, a re-run only verifies.
+6. **Try the binary** from the release page:
 
    ```sh
-   run=$(gh run list --workflow=release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-   gh run download "$run" -n pwv-release-vX -D dist-vX
-   ls dist-vX   # pwv-X-x86_64-linux, its two .LICENSE files, SHA256SUMS, pwv.sigstore.json
-   ```
-
-6. **Verify them** as a user would:
-
-   ```sh
-   cd dist-vX
-   gh attestation verify pwv-X-x86_64-linux --repo TheDansmod/password_manager \
-     --signer-workflow TheDansmod/password_manager/.github/workflows/release-build.yml
+   gh release download vX -D dist-vX && cd dist-vX
    sha256sum -c SHA256SUMS
    ./pwv-X-x86_64-linux doctor
-   ```
-
-7. **Publish.** Add `--prerelease` for a release candidate, or `--draft`
-   to keep it private until you publish it from the web page:
-
-   ```sh
-   gh release create vX dist-vX/* --verify-tag --title "pwv X" --notes "..."
    ```
 
 ### Rehearsal
 
 To try the whole procedure without making a real release, use a
-pre-release version such as `0.1.0-rc.1` (tag `v0.1.0-rc.1`) and publish
-it with `--draft` (visible only to you) or `--prerelease`. Things to know:
+pre-release version such as `0.1.0-rc.1` (tag `v0.1.0-rc.1`): it is
+published as a pre-release, never marked "Latest". Things to know:
 
 - The attestation is a permanent, public record that this repository built
   `pwv-0.1.0-rc.1-x86_64-linux`. That is harmless: the name says it is a
   release candidate, and a later `0.1.0` build gets its own name and its
   own attestation.
-- Afterwards, delete the draft release if you made one
-  (`gh release delete vX`); the tag can stay or be deleted
-  (`git push --delete origin vX && git tag -d vX`).
+- The pre-release is public and, like every release here, immutable.
+  It can be deleted (`gh release delete vX`), but GitHub does not let the
+  tag name be used for a release again; the next rehearsal needs a new
+  version (`0.1.0-rc.2`).
 - Set the version to the real one (step 2) before the real release.

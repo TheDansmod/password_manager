@@ -3539,7 +3539,7 @@ below rather than tested.
 | `store.rs:508:84` (now `541:84`) `replace > with ==` and `with >=` in `Store::read_state` | Valid gap, and the `==` variant hides a real failure mode: the existing over-1-MiB case used unparsable bytes, so refusing and truncating looked the same. Truncating a well-formed file would drop the rows after 1 MiB, this vault's among them, and with them rollback detection. | `tests/store.rs` `state_file_limit_refuses_and_never_truncates`: a well-formed state file of exactly 1 MiB (64-byte rows) whose last row is this vault's is read whole (rollback detected); the same rows behind one more are refused (`Error::State`). Both caught. |
 | `vault.rs:274` `adopt_dek` (2 mutants, `vault` 0/4 pass 1) | Not survivors: caught by the full suite in pass 2 (`passwd` end-to-end tests). | None. |
 | `vault.rs:364:40` (now `390:40`) `replace + with * in rewrite` | Equivalent: `room` clamps every request to the slot's capacity, so a larger request only enlarges the zeroed working area; the output is identical. | Justified below. |
-| `vault.rs:629:59` (now `655:59`) `replace + with * in Model<'a>::merge` | Not equivalent: caught locally by the new `vault` tests of this entry. | — |
+| `vault.rs:629:59` (now `655:59`) `replace + with * in Model<'a>::merge` | Not equivalent: caught locally by the new `vault` tests of this entry. (Wrong: it survives; equivalent, see 2026-11-19.) | — |
 | `vault.rs:629:69` (now `655:69`) `replace + with * in Model<'a>::merge` | Equivalent, as `390:40`. | Justified below. |
 | `vault.rs:629:69` (now `655:69`) `replace + with - in Model<'a>::merge` | Equivalent by the format's minimum sizes (argument below). | Justified below. New `tests/vault.rs` `import_capacity_rule_when_every_entry_clashes` covers the worst case the argument rests on (smallest entries, every one suffixed), which `import_capacity_rule` did not; it confirms the margin but cannot kill this mutant. |
 | `vault.rs:656:21` (now `682:21`) `replace > with ==` and `with >=` in `Model<'a>::merge` | Valid gap: Section 7.2 allows N ≤ 10,000; the limit test checked that `add` may reach it but not `import`. | `field_and_entry_limits`: after one `rm`, an import of one entry reaches exactly 10,000 and is accepted. Both caught (and `with <`). |
@@ -3736,6 +3736,80 @@ LOC budget (crypto + format 703/750, vault 491/500); cargo-mutants on
 `tests/crypto.rs`). **Not checked here:** whether CodeQL closes the two
 `src` alerts (it reruns on push).
 
+## 2026-11-19 — Mutants `vault` 3/4: `655:59`; automatic GitHub releases
+
+### `src/vault.rs:655:59: replace + with * in Model<'a>::merge`
+
+**What failed.** The `mutants.yml` run after the mutation fixes: every job
+green except `vault` 3/4, where `mutants_check.py` reported this mutant
+NOT JUSTIFIED. The 2026-11-18 table had called it "caught locally"; that
+was wrong. Rerun here with cargo-mutants 27.1.0 against the `vault` tests
+(`--lib --test=vault`): MISSED (baseline 295 s, mutant 286 s), as on CI,
+where it also survived both full-suite passes.
+
+**Verdict: equivalent.** The line is
+`room(&mut self.scratch, self.live.len() + 5 * len + format::BLOCK)`;
+the mutant asks for `live·5·len + BLOCK`. Both factors are at least
+`BLOCK` = 4096: `live` is always an emitted body (`Model::new` emits the
+empty body of one block, `adopt` installs only `emit` output), and `len`
+passed `parse_body`, whose `valid_block_len` refuses less than one block.
+For `a, b ≥ 2`, `5ab ≥ a + 5b`, so the mutant's request is never smaller,
+and `room` takes `min(request, capacity)`: the mutant gets the same or a
+larger area, never a smaller one. The original area already always fits
+the merge (the `655:69` `−` argument: merged body ≤ `live + 3·BLOCK` for a
+one-block import, < `4·len − BLOCK` beyond), and `emit` writes the same
+bytes and returns the same length whatever room is left over, so the
+result, every error, and the slot contents after `adopt` (tails wiped by
+`set_len`) are identical. Only the number of bytes zeroed and wiped
+differs. No overflow: at most `16 MiB · 5 · 16 MiB` = 5·2⁴⁸ on the 64-bit
+targets pwv supports. Not restructured away (as `parse_body`'s comparison
+was): any arithmetic in that request yields such mutants, and `vault` is
+at 491/500 lines.
+
+#### Surviving mutants (run of 2026-11-19)
+
+| Mutant | Date | Reason |
+| --- | --- | --- |
+| `src/vault.rs:655:59: replace + with * in Model<'a>::merge` | 2026-11-19 | Equivalent. `live` and `len` are each at least one block (4096): `live` is always emitted output, `len` passed `parse_body`. So `live·5·len + BLOCK ≥ live + 5·len + BLOCK`, and `room` clamps to capacity: the same or a larger area, in which `emit` writes the same bytes (the original area always suffices, see `655:69` `−`). Only the amount zeroed differs. |
+
+### Automatic GitHub releases (owner, 2026-11-19)
+
+**Decision.** The owner wants a tag push to publish the release, and has
+enabled immutable releases. This reverses "nothing is published
+automatically" (M9 decisions, 2026-11-16) and needs a job with
+`contents: write`, which spec 14.13 reserved for `coverage-report`. The
+repository spec (14.13, 15.3) is amended; the owner's copy is not (see
+"Changes to the owner's specification", item 8).
+
+**Review of the owner's proposed `release.yml` and `release-build.yml`.**
+Sound: build and attestation without write access, a separate `publish`
+job with `contents: write` and no `id-token`, draft until the last write,
+`--verify-tag`, `concurrency` without cancellation,
+`if-no-files-found: error`. Changed before installing:
+
+| Issue in the proposal | Change |
+| --- | --- |
+| Contradicted spec 14.13 and the comments in `ci.yml` and `release.yml`, and `DEVELOPMENT.md` ("you attach the files yourself") | Spec 14.13 and 15.3 amended; `ci.yml` comments say "the only ci.yml job"; `DEVELOPMENT.md` "Releasing" rewritten |
+| A tag push alone now makes an irreversible public release; the procedure's preconditions (main green with a full run, mutants green) were only a checklist | New read-only `gate` job before the build: the commit is on `main`; a green `ci.yml` run of that exact commit by schedule or "Run workflow"; a green `mutants.yml` run on `main` whose commit has the same `src/` and `tests/` (`tests/` added to the old "newer than the last change to `src/`": a weakened test can revive a mutant) |
+| A pre-release tag (`v0.1.0-rc.1`, the documented rehearsal) would be published as a normal, "Latest", immutable release; the rehearsal's "publish as a draft and delete it" no longer works | Hyphenated versions get `--prerelease`; rehearsal text rewritten (a deleted immutable release's tag cannot be reused) |
+| Any `gh release view` failure (network, token) meant "absent" | Only "release not found" means absent; other errors stop the job |
+| The pre-publication check compared names and sizes only, and a leftover draft with an extra file could never be completed | Draft assets not in `dist/` are deleted; the draft is downloaded and compared byte for byte (`cmp`) |
+| Verification used this run's `dist/`: a full re-run after publication rebuilds and gets a new Sigstore bundle, so `verify-asset` would fail on a sound release | Verifies the files downloaded from the published release: `gh release verify`, `verify-asset` each, `sha256sum -c`, `gh attestation verify --signer-workflow` for every attested file (what README tells users), and the binary offline against the shipped bundle; this automates the old manual step 6 |
+| `publish` lacked `attestations: read` for the attestation API calls | Added (read only) |
+| The comment "Third-party actions are (not) pinned to full commit SHAs; the trailing comment names the release each SHA was resolved from" described SHAs and comments that do not exist | Says what is true: major-version tags, as in `ci.yml` and `mutants.yml` (owner, 2026-11-19). Pinning to SHAs would be stronger for the one workflow with both `id-token: write` and `contents: write`; not done, by the owner's decision |
+| Title `vX` | `pwv X`, as the procedure had it |
+
+**Checked locally:** both files parse (PyYAML); jobs, `needs` and
+permissions are as listed; every `run:` block passes `bash -n`; the
+state step against a fake `gh` (absent, draft, published, and an HTTP
+error, which now fails); the mutants check of `gate` against a scratch
+repository (an earlier run with equal `src/` and `tests/` counts, a
+change to either refuses, an unknown SHA is skipped, no runs refuse).
+`test_ids.py --check` passes. **Not checked here** (no `gh`, network or
+Actions): the workflows themselves. The first real run should be a
+rehearsal tag (`v0.1.0-rc.1`); a failure before "Publish" leaves at most
+a draft.
+
 ## Changes to the owner's specification
 
 **Applied 2026-11-18 at the owner's request** to the owner's copy (kept
@@ -3799,6 +3873,17 @@ above) and M8's exit pause; the mutation and coverage fixes need none.
    `fs::rename`, and `fs::hard_link` outside `store`; and only `store`
    calls the `sys` file primitives (`open_at`, `rename_at`, `link_at`,
    `unlink_at`)". (R-06.)
+
+8. **Section 14.13 and 15.3, automatic releases** (2026-11-19; applied
+   to `docs/SPECIFICATION.md`, *not yet* to the owner's copy). 14.13 now:
+   "It is the only job with `contents: write`." Proposed: "It is the only
+   job of the CI workflow with `contents: write`; the other job that has it
+   is the release workflow's `publish` (Section 15.3)." 15.3, `release`
+   row, after the existing text: the gate (commit on `main`, green full CI
+   run, green `mutants` run of the same `src/` and `tests/`) and "then an
+   immutable GitHub release of those files, a draft until every file is
+   uploaded and checked, a pre-release for a pre-release version, verified
+   after publication".
 
 For the owner to decide (not a deviation): Section 8.4 does not bound the
 state file. The code refuses one over 1 MiB (`STATE_MAX`), and a test now

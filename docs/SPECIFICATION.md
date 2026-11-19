@@ -860,7 +860,7 @@ Runs in the same job are merged by `cargo-llvm-cov` itself, which is exact. If t
 
 It uploads HTML, LCOV, and JSON reports as artefacts, kept for 30 days. Coverage figures never include program output, because tests print no content (Section 17, rule 9).
 
-**Badges.** On runs on `main` (pushes, the nightly schedule, and manual runs; never pull requests), `coverage-report` renders SVG badges for overall line coverage (T-COV-1) and for the number of Section 14 test IDs passing, and pushes them to an orphan `badges` branch, which holds only those files. The test-ID badge comes from full runs only (nightly or manual); T-MUT-1 is taken from the latest weekly `mutants` run if it finished within eight days. It is the only job with `contents: write`. `README.md` references the badges, together with GitHub's CI status badge. CI never commits to `main` or edits `README.md`. No coverage data is sent to third-party services.
+**Badges.** On runs on `main` (pushes, the nightly schedule, and manual runs; never pull requests), `coverage-report` renders SVG badges for overall line coverage (T-COV-1) and for the number of Section 14 test IDs passing, and pushes them to an orphan `badges` branch, which holds only those files. The test-ID badge comes from full runs only (nightly or manual); T-MUT-1 is taken from the latest weekly `mutants` run if it finished within eight days. It is the only job of the CI workflow with `contents: write`; the other job that has it is the release workflow's `publish` (Section 15.3). `README.md` references the badges, together with GitHub's CI status badge. CI never commits to `main` or edits `README.md`. No coverage data is sent to third-party services.
 
 **When it is introduced.** The coverage jobs, the report, and the badges are added at M9 and gate from then on.
 
@@ -914,7 +914,7 @@ The build is pinned, locked, and reproducible, and CI runs every gate of Section
 | `fuzz-long` | Nightly | 30 min per target; corpus saved; T-COV-6 |
 | `ci-ok` | Every run, last | Passes only if every other job passed or was skipped; the status check that branch protection requires |
 | `mutants` (workflow `mutants.yml`) | Weekly, on demand, and before release | T-MUT-1 |
-| `release` (workflows `release.yml`, `release-build.yml`) | Version tag `v*` | Tag must equal `v` + the `Cargo.toml` version; T-REPRO-1, T-ENG-7, then build, `sha256sum`, and an attested (signed) checksum file |
+| `release` (workflows `release.yml`, `release-build.yml`) | Version tag `v*` | The tagged commit is on `main` and has a green full CI run, and a green `mutants` run tested the same `src/` and `tests/`; tag must equal `v` + the `Cargo.toml` version; T-REPRO-1, T-ENG-7, then build, `sha256sum`, and an attested (signed) checksum file; then an immutable GitHub release of those files, a draft until every file is uploaded and checked, a pre-release for a pre-release version, verified after publication |
 
 ### 15.4 Documentation deliverables
 

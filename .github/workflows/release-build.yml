@@ -7,6 +7,14 @@
 #     --signer-workflow TheDansmod/password_manager/.github/workflows/release-build.yml
 # No key exists to look after. Only tag builds are attested; the per-push
 # `release-check` job in ci.yml runs the same script without signing.
+#
+# This workflow never holds `contents: write`. It hands dist/ to the caller
+# as a workflow artifact; release.yml's `publish` job turns that artifact
+# into an immutable GitHub Release. release.yml's read-only `gate` job
+# (main green, mutants green) runs before this workflow.
+#
+# Actions are referenced by major-version tag, not pinned to commit SHAs
+# (owner, 2026-11-19), as in ci.yml and mutants.yml.
 name: release-build
 
 on:
@@ -63,4 +71,8 @@ jobs:
         with:
           name: pwv-release-${{ github.ref_name }}
           path: dist/
+          # The Release, not this artifact, is the distribution channel; the
+          # artifact carries dist/ from `build` to `publish` and allows a
+          # re-run of `publish` while it is retained.
           retention-days: 90
+          if-no-files-found: error

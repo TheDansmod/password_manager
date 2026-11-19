@@ -1,8 +1,29 @@
-# Spec 15.3 `release`: on a version tag, T-REPRO-1, T-ENG-7, build,
-# sha256sum, and a signed checksum file (attestation; see
-# release-build.yml). It publishes nothing itself: the owner attaches the
-# artefact to a GitHub release, so no job here needs `contents: write`
-# (spec 14.13: only `coverage-report` has it).
+# Tag-triggered release (spec 15.3 `release`; owner, 2026-11-19: publish
+# automatically).
+#
+#   gate     - the tagged commit is on `main`, has a green full ci.yml run
+#              (nightly or "Run workflow"), and a green mutants.yml run on
+#              `main` tested the same src/ and tests/ (docs/DEVELOPMENT.md,
+#              "Releasing", steps 1 to 3). Read-only.
+#   release  - reusable release-build.yml: version check, T-REPRO-1, T-ENG-7,
+#              build, Sigstore attestation. Holds id-token: write, never
+#              contents: write.
+#   publish  - turns the attested files into a GitHub Release. Holds
+#              contents: write, never id-token: write. With ci.yml's
+#              `coverage-report`, the only jobs with contents: write
+#              (spec 14.13, as amended 2026-11-19).
+#
+# Immutable releases are enabled for this repository (owner, 2026-11-19).
+# Once a release is published, its assets and its tag can no longer change,
+# and GitHub attaches a release attestation. Drafts stay mutable, so
+# `publish` builds the release as a draft, uploads and checks every file
+# byte for byte, and publishes only as the very last write. A re-run finds a
+# leftover draft and completes it, or finds a published release and only
+# verifies it. A tag with a pre-release version (`v0.1.0-rc.1`) is
+# published as a pre-release, never as "Latest".
+#
+# Actions are referenced by major-version tag, not pinned to commit SHAs
+# (owner, 2026-11-19), as in ci.yml and mutants.yml.
 name: release
 
 on:
@@ -11,10 +32,188 @@ on:
 
 permissions: {}
 
+defaults:
+  run:
+    shell: bash
+
+# Two runs for the same tag (for example a manual re-run) must not race on
+# the same draft. The second run waits; it is never cancelled midway.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  gate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout with history
+      actions: read # list ci.yml and mutants.yml runs
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # main's history, to compare with mutants runs
+          persist-credentials: false
+      - name: The tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not on main; release only commits of main"
+            exit 1
+          fi
+      - name: A full ci.yml run on this commit is green
+        # Tags do not start ci.yml. A push run skips the nightly jobs, so a
+        # nightly or "Run workflow" run of this exact commit is required.
+        run: |
+          n=$(gh run list --workflow ci.yml --commit "$SHA" --status success \
+                --limit 100 --json event \
+                --jq '[.[] | select(.event == "schedule" or .event == "workflow_dispatch")] | length')
+          if [ "$n" -lt 1 ]; then
+            echo "::error::no green nightly or \"Run workflow\" ci.yml run of $SHA; run: gh workflow run ci.yml --ref main"
+            exit 1
+          fi
+          echo "green full ci.yml runs of $SHA: $n"
+      - name: A green mutants.yml run tested the same src/ and tests/
+        # T-MUT-1 "before release" (spec 15.3). Any successful run on main
+        # whose commit has the same src/ and tests/ counts: the release
+        # commit itself usually changes only the version.
+        run: |
+          gh run list --workflow mutants.yml --branch main --status success \
+            --limit 100 --json headSha --jq '.[].headSha' > mutants-runs.txt
+          while IFS= read -r s; do
+            if git cat-file -e "$s^{commit}" 2>/dev/null \
+              && git diff --quiet "$s" "$SHA" -- src tests; then
+              echo "mutants.yml run on $s tested the same src/ and tests/"
+              exit 0
+            fi
+          done < mutants-runs.txt
+          echo "::error::no green mutants.yml run on main tested this src/ and tests/; run: gh workflow run mutants.yml --ref main"
+          exit 1
+
   release:
+    needs: gate
     permissions:
       contents: read
       id-token: write
       attestations: write
     uses: ./.github/workflows/release-build.yml
+
+  publish:
+    # Runs only after the gate, the version check, the build checks and
+    # the attestation all succeeded.
+    needs: release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the draft, upload assets, publish
+      attestations: read # gh release verify, gh attestation verify
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }} # gh needs no checkout with this set
+      TAG: ${{ github.ref_name }}
+      SIGNER: ${{ github.repository }}/.github/workflows/release-build.yml
+    steps:
+      - name: Download the attested files
+        uses: actions/download-artifact@v7
+        with:
+          name: pwv-release-${{ github.ref_name }}
+          path: dist
+
+      - name: Find the release's current state
+        id: state
+        # Only "release not found" means absent; any other failure (network,
+        # token) stops the job rather than guessing.
+        run: |
+          gh --version
+          if gh release view "$TAG" --json isDraft --jq .isDraft > state.txt 2> err.txt; then
+            if [ "$(cat state.txt)" = true ]; then state=draft; else state=published; fi
+          elif grep -q 'release not found' err.txt; then
+            state=absent
+          else
+            cat err.txt >&2
+            echo "::error::cannot read release $TAG"
+            exit 1
+          fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "release $TAG: $state"
+          if [ "$state" = published ]; then
+            echo "::notice::release $TAG is already published and immutable; only verifying it"
+          fi
+
+      - name: Create the release as a draft
+        if: ${{ steps.state.outputs.state == 'absent' }}
+        # --verify-tag: never let gh create a tag of its own at main's tip.
+        # A version with a pre-release part (SemVer: a hyphen) is a
+        # pre-release, which GitHub never marks "Latest".
+        run: |
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$TAG" \
+            --draft \
+            --verify-tag \
+            --title "pwv ${TAG#v}" \
+            --generate-notes \
+            "${pre[@]}"
+
+      - name: Upload the files to the draft
+        if: ${{ steps.state.outputs.state != 'published' }}
+        # The release is still a draft: assets of an earlier run that this
+        # run does not have are deleted, and --clobber replaces the rest.
+        run: |
+          gh release view "$TAG" --json assets --jq '.assets[].name' > old.txt
+          while IFS= read -r a; do
+            if [ ! -e "dist/$a" ]; then gh release delete-asset "$TAG" "$a" --yes; fi
+          done < old.txt
+          gh release upload "$TAG" dist/* --clobber
+
+      - name: Check the draft holds exactly these files, byte for byte
+        if: ${{ steps.state.outputs.state != 'published' }}
+        # After publishing nothing can be removed or replaced, so the asset
+        # set must be exact first: same names, same bytes, nothing extra.
+        run: |
+          gh release download "$TAG" --dir draft
+          if ! diff -u <(cd dist && ls) <(cd draft && ls); then
+            echo "::error::draft $TAG does not hold exactly the attested files; not publishing"
+            exit 1
+          fi
+          for f in dist/*; do
+            cmp "$f" "draft/${f#dist/}"
+          done
+          echo "draft $TAG holds exactly the attested files"
+
+      - name: Publish (the release becomes immutable here)
+        if: ${{ steps.state.outputs.state != 'published' }}
+        run: gh release edit "$TAG" --draft=false
+
+      - name: Verify the release as a user would
+        # Checks the files as published, not this run's dist/: a re-run of
+        # the whole workflow rebuilds and gets a new Sigstore bundle, which
+        # is not the one the release holds. GitHub writes the release
+        # attestation on publication; allow it a short time to appear.
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if gh release verify "$TAG"; then break; fi
+            if [ "$attempt" = 6 ]; then
+              echo "::error::no valid release attestation for $TAG"
+              exit 1
+            fi
+            sleep 10
+          done
+          gh release download "$TAG" --dir released
+          for f in released/*; do
+            gh release verify-asset "$TAG" "$f"
+          done
+          cd released
+          sha256sum -c SHA256SUMS
+          # The build provenance, as README.md "Verifying a release" tells
+          # users: every file in SHA256SUMS and SHA256SUMS itself; the
+          # binary also offline, against the shipped bundle.
+          for f in $(awk '{print $2}' SHA256SUMS) SHA256SUMS; do
+            gh attestation verify "$f" --repo "$GH_REPO" --signer-workflow "$SIGNER"
+          done
+          bin=$(awk 'NR == 1 {print $2}' SHA256SUMS)
+          gh attestation verify "$bin" --bundle pwv.sigstore.json \
+            --repo "$GH_REPO" --signer-workflow "$SIGNER"
