@@ -88,24 +88,34 @@ impl Clip {
         Err(Error::Unsupported)
     }
 
-    /// The current clipboard text; the returned `String` is wiped by the
-    /// allocator when dropped.
+    /// The current clipboard text (the `String` is wiped by the allocator
+    /// when dropped): `Err(true)` if the clipboard holds something that
+    /// cannot be our value (nothing, another format, not UTF-8), and
+    /// `Err(false)` if it could not be read at all.
     #[cfg(feature = "clipboard")]
-    fn get(&mut self) -> Option<String> {
-        self.board.as_mut()?.get_text().ok()
+    fn get(&mut self) -> Result<String, bool> {
+        use arboard::Error as E;
+        match self.board.as_mut().map(arboard::Clipboard::get_text) {
+            Some(Ok(text)) => Ok(text),
+            Some(Err(E::ContentNotAvailable | E::ConversionFailure)) => Err(true),
+            _ => Err(false),
+        }
     }
 
     #[cfg(not(feature = "clipboard"))]
     #[allow(clippy::unused_self, reason = "same signature as the clipboard build")]
-    fn get(&mut self) -> Option<String> {
-        None
+    fn get(&mut self) -> Result<String, bool> {
+        Err(true)
     }
 
     /// Expiry, and every exit path (Section 11.3 step 3): if the clipboard
     /// still holds the value in `slot` (compared in constant time), sets it
-    /// to the empty string. `slot` is zeroed in every case, also when the
-    /// clipboard cannot be read. Call this before dropping the `Clip`
-    /// (step 4), so a hand-over to a clipboard manager carries nothing.
+    /// to the empty string. If it cannot be read at all, it is cleared too
+    /// (fail closed, review finding R-09: on Wayland the value would
+    /// otherwise be served until another client replaced it); a clipboard
+    /// that demonstrably holds something else is left alone. `slot` is
+    /// zeroed in every case. Call this before dropping the `Clip` (step 4),
+    /// so a hand-over to a clipboard manager carries nothing.
     ///
     /// The clipboard handle is then dropped (the next copy makes a new
     /// one): a value that another client pasted went through the X11
@@ -114,9 +124,10 @@ impl Clip {
     /// handle frees that buffer, and the allocator wipes it (T-MEM-4).
     pub fn clear_if_unchanged(&mut self, slot: &mut SecretSlot<'_>) {
         if !slot.is_empty() {
-            let ours = self
-                .get()
-                .is_some_and(|now| crypto::ct_eq(now.as_bytes(), slot.expose()));
+            let ours = match self.get() {
+                Ok(now) => crypto::ct_eq(now.as_bytes(), slot.expose()),
+                Err(other) => !other,
+            };
             if ours {
                 let _ = self.set("", true);
             }

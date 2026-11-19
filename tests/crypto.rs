@@ -392,22 +392,34 @@ fn t_cry_1_every_bit_flip_fails() {
     crypto::derive_kek(s.pw2.expose(), &h.salt, p, &mut s.kek, false).unwrap();
     vault::open_with_kek(&file, s.kek.expose(), &mut s.dek, &mut s.vault_a).expect("intact");
     let mut f = file.clone();
-    let mut cases = 0;
+    // Every flip fails authentication, except where the format layer itself
+    // refuses the file first (a header field out of its range, or a length
+    // that no longer matches): those are counted separately, and must be
+    // exactly the flips that `format::split_file` refuses (review finding
+    // R-15). Every payload and tag flip is an authentication failure.
+    let (mut auth, mut malformed) = (0, 0);
     for i in 0..f.len() {
         for bit in 0..8 {
             f[i] ^= 1 << bit;
             let r = vault::open_with_kek(&f, s.kek.expose(), &mut s.dek, &mut s.vault_a);
             match r {
-                Err(AUTH) => {}
-                Err(vault::Error::Format(_)) if i < HEADER_LEN => {}
+                Err(AUTH) if format::split_file(&f).is_ok() => auth += 1,
+                Err(vault::Error::Format(_)) if format::split_file(&f).is_err() => malformed += 1,
                 other => panic!("byte {i} bit {bit}: {:?}", other.map(|_| ())),
             }
             assert!(s.dek.is_empty() && s.vault_a.is_empty(), "byte {i}");
             f[i] ^= 1 << bit;
-            cases += 1;
         }
     }
-    assert_eq!(cases, 8 * file.len());
+    assert_eq!(auth + malformed, 8 * file.len());
+    assert!(
+        auth >= 8 * (file.len() - HEADER_LEN),
+        "a payload flip did not fail auth"
+    );
+    assert!(
+        malformed > 0 && malformed < 8 * HEADER_LEN,
+        "{malformed} malformed"
+    );
     // Full path: KDF each time. Flips that raise kdf_m_kib above 64 MiB
     // are resampled (the cached-KEK sweep above covers them; deriving with
     // up to 4 GiB per case is out of budget).
@@ -419,8 +431,12 @@ fn t_cry_1_every_bit_flip_fails() {
         let m = parse_header(&f).map(|h| h.kdf_m_kib).unwrap_or(0);
         if m <= 65_536 {
             let r = unlock_model(&f, &pw);
+            let malformed = format::split_file(&f).is_err();
             assert!(
-                matches!(r, Err(AUTH | vault::Error::Format(_))),
+                matches!(
+                    (r, malformed),
+                    (Err(AUTH), false) | (Err(vault::Error::Format(_)), true)
+                ),
                 "full path, byte {i} bit {bit}"
             );
             full += 1;

@@ -68,6 +68,9 @@ pub struct Hardening {
     /// Whether fd 0 is a terminal. Only `import --from-stdin` may run
     /// without one (Sections 9.3, 12.2); `cli` refuses everything else.
     pub stdin_tty: bool,
+    /// Whether fd 0 is a pipe (FIFO): `import --from-stdin` refuses
+    /// anything else, a regular file included (Section 12.2 step 1).
+    pub stdin_pipe: bool,
 }
 
 /// Hardens the process (spec Section 5.1). Must be the first call in `main`.
@@ -94,6 +97,8 @@ pub fn harden() -> Result<Hardening, Error> {
         return Err(Error::NotATty);
     }
     let stdin_tty = rustix::termios::isatty(rustix::stdio::stdin());
+    let stdin_pipe = rustix::fs::fstat(rustix::stdio::stdin())
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Fifo);
     install_panic_hook();
     let mut lim = rustix::process::getrlimit(Resource::Memlock);
     if lim.current != lim.maximum {
@@ -108,6 +113,7 @@ pub fn harden() -> Result<Hardening, Error> {
     Ok(Hardening {
         memlock_limit: lim.current,
         stdin_tty,
+        stdin_pipe,
     })
 }
 

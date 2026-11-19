@@ -1381,6 +1381,15 @@ fn field_and_entry_limits() {
     );
     check_act(&mut m, &mut r, &Act::Rm(s("00000"))).expect("rm");
     check_act(&mut m, &mut r, &Act::Add(s("new"))).expect("add at the limit");
+    // An import may likewise reach the limit, and not pass it.
+    check_act(&mut m, &mut r, &Act::Rm(s("00001"))).expect("rm");
+    let act = Act::Import(Ref::from([(s("imp"), vec![])]), false);
+    assert_eq!(
+        check_act(&mut m, &mut r, &act),
+        Ok(1),
+        "import at the limit"
+    );
+    assert_eq!(m.len(), 10_000);
 }
 
 #[test]
@@ -1582,6 +1591,51 @@ fn import_capacity_rule() {
         }
     }
     assert!(ok > 1 && refused > 1, "ok {ok}, refused {refused}");
+}
+
+/// The capacity rule of import holds also where the merge grows most: the
+/// smallest entries the format allows (no fields; the 94 one-byte names,
+/// then two-byte ones), every one of them clashing, so each gains the
+/// 11-byte suffix. Each import is accepted exactly when the reference
+/// model says the result fits (`check_act`), up to sizes it refuses.
+#[test]
+fn import_capacity_rule_when_every_entry_clashes() {
+    let name = |i: u8| b'!' + i % 94;
+    let names = |n: usize| -> Ref {
+        (0..n)
+            .map(|i| match u8::try_from(i) {
+                Ok(i) if i < 94 => vec![name(i)],
+                _ => {
+                    let j = i - 94;
+                    vec![
+                        name(u8::try_from(j / 94).expect("name")),
+                        name((j % 94) as u8),
+                    ]
+                }
+            })
+            .map(|n| (n, vec![]))
+            .collect()
+    };
+    let (mut ok, mut refused) = (0, 0);
+    let mut n = 16;
+    while refused == 0 {
+        let mut r = names(n);
+        let mut a = SecureArena::new(MIN_ARENA, true).expect("arena");
+        let s2 = a.slots().expect("slots");
+        let mut m = model_of(s2.vault_a, s2.vault_b, &r);
+        match check_act(&mut m, &mut r, &Act::Import(names(n), true)) {
+            Ok(k) => {
+                assert_eq!(k, n);
+                ok += 1;
+            }
+            Err(e) => {
+                assert_eq!(e, E::Capacity, "{n} entries");
+                refused += 1;
+            }
+        }
+        n += n / 4;
+    }
+    assert!(ok > 4, "ok {ok}");
 }
 
 /// Section 15.5: the import parsing path rejects every truncation of a

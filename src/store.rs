@@ -226,6 +226,25 @@ fn check(
     Ok(i)
 }
 
+/// Creates `dir` and its missing ancestors (mode 0700), then `fsync`s the
+/// parent of each directory created, deepest first, so that the new names
+/// are as durable as the files later saved in them (Section 8.3, G5).
+/// Returns the parents synced. A parent is opened following symlinks: it
+/// is an existing directory of the user, never the vault directory.
+fn create_dirs(dir: &Path) -> Result<Vec<&Path>, Error> {
+    let parents: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(d).is_err())
+        .map(|d| d.parent().filter(|p| !p.as_os_str().is_empty()))
+        .map(|p| p.unwrap_or(Path::new(".")))
+        .collect();
+    DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    for p in &parents {
+        File::open(p)?.sync_all()?;
+    }
+    Ok(parents)
+}
+
 /// Opens and checks the directory of `path`, creating it (mode 0700) first
 /// if `create`. The filesystem is checked first: on a foreign filesystem
 /// owner and mode are synthetic, so their errors would mislead. Returns
@@ -238,10 +257,7 @@ fn open_parent(
 ) -> Result<(OwnedFd, PathBuf, OsString), Error> {
     let (dir_path, name) = split(path)?;
     if create {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir_path)?;
+        create_dirs(&dir_path)?;
     }
     let dir = sys::open_dir(&dir_path).map_err(found)?;
     if !foreign && is_foreign_fs(sys::fs_magic(dir.as_fd())?) {
@@ -404,6 +420,23 @@ impl Store {
 
     fn backup(&self, i: u8) -> OsString {
         named(&[self.name.as_bytes(), b".", &[b'0' + i]])
+    }
+
+    /// Deletes the backups `.1` to `.5`, then `fsync`s the directory
+    /// (`passwd --purge-backups`: after a password change they still open
+    /// with the old password; review finding R-11).
+    ///
+    /// # Errors
+    /// Any I/O [`Error`]; backups already missing are not an error.
+    pub fn purge_backups(&self) -> Result<(), Error> {
+        let dir = self.dir.as_fd();
+        for i in 1..=BACKUPS {
+            match sys::unlink_at(dir, &self.backup(i)) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(sys::fsync(dir)?)
     }
 
     /// Saves `file` (Section 8.3): rotates the backups, links the current
@@ -631,6 +664,30 @@ mod tests {
             .collect()
     }
 
+    /// Review finding R-04: the parent of every directory `create_dirs`
+    /// makes is synced, deepest first, and nothing else.
+    #[test]
+    fn create_dirs_syncs_the_parent_of_each_new_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tmp.path();
+        let deep = t.join("a/b/c");
+        let (ab, a) = (t.join("a/b"), t.join("a"));
+        assert_eq!(create_dirs(&deep).unwrap(), [ab.as_path(), &a, t]);
+        for d in [&deep, &ab, &a] {
+            assert_eq!(fs::metadata(d).unwrap().mode() & 0o777, 0o700);
+        }
+        assert_eq!(create_dirs(&deep).unwrap(), Vec::<&Path>::new());
+        assert_eq!(create_dirs(&deep.join("d")).unwrap(), [deep.as_path()]);
+        // A relative path: the parent of a new top-level directory is `.`.
+        let rel = format!(".pwv-create-dirs-{}", std::process::id());
+        let made = create_dirs(Path::new(&rel).join("x").as_path()).map(|v| v.len());
+        let top = format!("{rel}-y");
+        let synced_dot = create_dirs(Path::new(&top)).unwrap();
+        let _ = (fs::remove_dir_all(&rel), fs::remove_dir(&top));
+        assert_eq!(made.unwrap(), 2);
+        assert_eq!(synced_dot, [Path::new(".")]);
+    }
+
     /// The fault points of one save, in order.
     fn expected(fail_link: bool) -> Vec<&'static str> {
         let mut v = vec!["rotate"; 4];
@@ -641,6 +698,30 @@ mod tests {
         v.extend(WRITE); // the vault
         v.extend(WRITE); // the state file
         v
+    }
+
+    /// A crash at "partial write" must leave what the name says, a torn
+    /// write: one temporary file holding a non-empty strict prefix of the
+    /// file being written (the copy to `.1`, the vault, or the state).
+    /// Otherwise that case would only repeat the crash at "create temp".
+    fn assert_torn(p: &Paths, prior: u64, ctx: &str) {
+        let state = format!("{} {}\n", "07".repeat(16), prior + 1).into_bytes();
+        let whole = [file(prior), file(prior + 1), state];
+        let mut temps = Vec::new();
+        for dir in [p.vault.parent().unwrap(), p.state.parent().unwrap()] {
+            for n in names(dir).into_iter().filter(|n| n.contains(".tmp.")) {
+                temps.push(fs::read(dir.join(n)).unwrap());
+            }
+        }
+        assert_eq!(temps.len(), 1, "{ctx}: temporary files");
+        let t = &temps[0];
+        assert!(
+            whole
+                .iter()
+                .any(|w| !t.is_empty() && t.len() < w.len() && w.starts_with(t)),
+            "{ctx}: {} bytes are not a torn write",
+            t.len()
+        );
     }
 
     #[test]
@@ -683,6 +764,9 @@ mod tests {
                     });
                     let crashed = catch_unwind(AssertUnwindSafe(move || hk.save(&file(prior + 1))));
                     assert!(crashed.is_err(), "{ctx}: no crash: {:?}", crashed.ok());
+                    if *point == "partial write" {
+                        assert_torn(&p, prior, &ctx);
+                    }
 
                     // Restart: open never fails and yields exactly old or new.
                     let got;
@@ -762,6 +846,41 @@ mod tests {
         let mut n = names(vdir);
         n.sort();
         assert_eq!(n.len(), 7, "{n:?}");
+    }
+
+    /// The copy fallback reads the current vault into memory, but never
+    /// more than the largest valid vault (Section 7: header, at most 16 MiB
+    /// of payload, tag). A current file of that size is copied; one that
+    /// has grown past it while the session was open cannot be a vault and
+    /// is refused before anything is written, not read whole.
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test grows the vault behind the store's back"
+    )]
+    fn copy_fallback_reads_at_most_the_largest_vault() {
+        let largest = HEADER_LEN + format::MAX_PAYLOAD + format::TAG_LEN;
+        for (size, copied) in [(largest, true), (largest + 1, false)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let p = paths(tmp.path());
+            setup(&p, 1);
+            let (st, _) = Store::open(p.clone(), false).unwrap();
+            let size = u64::try_from(size).unwrap();
+            let grown = fs::OpenOptions::new().write(true).open(&p.vault).unwrap();
+            grown.set_len(size).unwrap();
+            let mut st = hooked(st, |pt| pt == "link");
+            let backup = p.vault.with_extension("pwv.1");
+            let saved = st.save(&file(2));
+            if copied {
+                saved.unwrap();
+                assert_eq!(fs::metadata(&backup).unwrap().len(), size);
+                assert_eq!(fs::read(&p.vault).unwrap(), file(2));
+            } else {
+                assert_eq!(saved, Err(format::Error::FileLength.into()), "{size}");
+                assert!(!backup.exists(), "a backup was written");
+                assert_eq!(fs::metadata(&p.vault).unwrap().len(), size);
+            }
+        }
     }
 
     #[test]

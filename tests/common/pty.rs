@@ -84,13 +84,20 @@ impl Pty {
     /// Runs `cmd` on a new PTY. ptyprocess starts children with `ECHO`
     /// off, which would make every "not visible" assertion vacuous, so the
     /// child turns echo on (`stty echo`) before it execs the program.
+    pub fn spawn(cmd: Command) -> Pty {
+        Pty::spawn_shell("exec \"$0\" \"$@\"", cmd)
+    }
+
+    /// Runs `script` with `sh -c` on a new PTY, after `stty echo`; in the
+    /// script, `"$0" "$@"` is `cmd`. Shared by [`Pty::spawn`] and
+    /// [`Pty::spawn_piped`]; tests use it for other redirections.
     #[allow(
         clippy::disallowed_methods,
         reason = "tests spawn children; Section 5.7 binds the binary only"
     )]
-    pub fn spawn(cmd: Command) -> Pty {
+    pub fn spawn_shell(script: &str, cmd: Command) -> Pty {
         let mut sh = Command::new("sh");
-        sh.args(["-c", "stty echo && exec \"$0\" \"$@\""]);
+        sh.arg("-c").arg(format!("stty echo && {script}"));
         sh.arg(cmd.get_program()).args(cmd.get_args());
         for (k, v) in cmd.get_envs() {
             match v {
@@ -111,30 +118,8 @@ impl Pty {
 
     /// Runs `<producer> | cmd` on a new PTY: stdin of `cmd` is a pipe,
     /// its terminal is the PTY.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "tests spawn children; Section 5.7 binds the binary only"
-    )]
     pub fn spawn_piped(producer: &str, cmd: Command) -> Pty {
-        let mut sh = Command::new("sh");
-        sh.arg("-c")
-            .arg(format!("stty echo && {producer} | \"$0\" \"$@\""));
-        sh.arg(cmd.get_program()).args(cmd.get_args());
-        for (k, v) in cmd.get_envs() {
-            match v {
-                Some(v) => sh.env(k, v),
-                None => sh.env_remove(k),
-            };
-        }
-        if let Some(dir) = cmd.get_current_dir() {
-            sh.current_dir(dir);
-        }
-        let session = expectrl::session::Session::spawn(sh).expect("spawn on a pty");
-        Pty {
-            session,
-            screen: Vec::new(),
-            cursor: 0,
-        }
+        Pty::spawn_shell(&format!("{producer} | \"$0\" \"$@\""), cmd)
     }
 
     /// The PTY master, for `tcgetattr`.

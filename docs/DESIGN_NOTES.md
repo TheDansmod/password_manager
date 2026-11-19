@@ -2867,13 +2867,15 @@ Uncovered production lines and functions of `format`, `crypto`, `gen`,
 `scripts/coverage_report.py`: one row per line or range,
 `| src/<file>:<line>[-<line>] | line or function | date | reason |`.
 First rows from M9 CI round 3 (default run only; see that entry).
+Line numbers updated 2026-11-18 after the review fixes moved the code
+(entry "Coverage gate failure on the review-fix PR").
 
 | Location | Kind | Date | Reason |
 | --- | --- | --- | --- |
-| `src/store.rs:268` | line | 2026-11-17 | `flock` on a lock file just opened by this process fails with `EWOULDBLOCK` (handled above as `InUse`, tested) or only `EINTR`/`ENOLCK` (signal during a blocking wait; kernel out of lock records), which no test can provoke without fault injection in `sys`. Maps to the generic `Io`. |
-| `src/store.rs:294` | line | 2026-11-17 | The file grew between `fstat` and the read: a writer outside the lock protocol racing this read. Defensive (fails closed as `FileLength`); a deterministic test would need a concurrent writer timed between two syscalls. |
-| `src/store.rs:451` | line | 2026-11-17 | `link(2)` failing with anything but `NOENT` / `PERM` / `OPNOTSUPP` / `NOSYS` (all tested; `PERM` through the step hook and on vfat): `EMLINK`, `ENOSPC`, `EIO`, or `EEXIST` from a file created at `.1` by someone else after the rotation. Not reproducible without fault injection; the save fails before the vault is touched. |
-| `src/vault.rs:311` | line | 2026-11-17 | `user()` maps `BodyWriter` errors of a rewrite. Every input is validated before `emit` (`input_validation_is_checked_first_and_named`) and the items come from a canonical body, so only `Capacity` (line 310, tested) can occur; the `Invalid` arm is defensive. |
+| `src/store.rs:284` | line | 2026-11-17 | `flock` on a lock file just opened by this process fails with `EWOULDBLOCK` (handled above as `InUse`, tested) or only `EINTR`/`ENOLCK` (signal during a blocking wait; kernel out of lock records), which no test can provoke without fault injection in `sys`. Maps to the generic `Io`. |
+| `src/store.rs:310` | line | 2026-11-17 | The file grew between `fstat` and the read: a writer outside the lock protocol racing this read. Defensive (fails closed as `FileLength`); a deterministic test would need a concurrent writer timed between two syscalls. |
+| `src/store.rs:484` | line | 2026-11-17 | `link(2)` failing with anything but `NOENT` / `PERM` / `OPNOTSUPP` / `NOSYS` (all tested; `PERM` through the step hook and on vfat): `EMLINK`, `ENOSPC`, `EIO`, or `EEXIST` from a file created at `.1` by someone else after the rotation. Not reproducible without fault injection; the save fails before the vault is touched. |
+| `src/vault.rs:334` | line | 2026-11-17 | `user()` maps `BodyWriter` errors of a rewrite. Every input is validated before `emit` (`input_validation_is_checked_first_and_named`) and the items come from a canonical body, so only `Capacity` (line 333, tested) can occur; the `Invalid` arm is defensive. |
 
 ### Surviving mutants
 
@@ -3442,3 +3444,365 @@ documentation files moved to `docs/`.
   (PyYAML 6.0.2), `sh -n` on the changed scripts.
 - Earlier entries in this file name files at their old top-level paths;
   they describe the repository as it was then.
+
+## 2026-11-18 — M9 independent review (rule 12): findings and fixes
+
+The rule-12 review (a separate session on an exported tree without
+history or this file, decision 8 of 2026-11-16) reported 15 findings
+(`REVIEW_FINDINGS.md`, outside the repository): no Critical or High, one
+Medium, seven Low, seven Info. Its archive fingerprint matches this tree
+with `docs/DESIGN_NOTES.md` excluded, so it reviewed exactly this code.
+Each finding was checked against the code; 14 were fixed, R-01 was not a
+defect of the repository. Owner's request (2026-11-18): fix all valid
+findings.
+
+| ID | Verdict | Change |
+| --- | --- | --- |
+| R-01 Medium, DESIGN_NOTES missing | Not valid for the repository: the file was withheld from the reviewer by design. The rule-5 exceptions are under M7 "Heap copies". | Hardening only: new `tests/eng.rs` `cited_documents_exist` (the cited documents and the sections the gates read exist); `coverage_report.py --notes` now fails on a missing file instead of reading "no exceptions". |
+| R-02 Low, one-shot arguments after a rollback `yes` | Valid; reproduced (`pwv show site` after `yes`: "no such entry"). | `unlock` reads the answer into `Pw2` (free after `vault::derive`), not `Input`, and clears it. T-STORE-5 (e2e) gains one-shot `show` and `mv` after `yes`; fails without the fix. |
+| R-03 Low, `import` accepts a regular file | Valid: the M7 interpretation "pipe = not a terminal" was weaker than 12.2 step 1. | `Hardening::stdin_pipe` (`fstat(0)`, `S_ISFIFO`); `import` refuses anything else **before** the master password is asked (a terminal stdin no longer costs a key derivation). T-E2E-10: a regular file is refused (fails without the fix), a terminal is refused without a password prompt (stricter than before), positive control through a pipe. |
+| R-04 Low, new directories not durable | Valid (POSIX does not order directory creation with a later child `fsync`). | `store::create_dirs`: records the missing ancestors, creates them (0700), then `fsync`s the parent of each, deepest first; parents are opened following symlinks (they are the user's directories). Unit test checks exactly which parents are synced (absolute and relative paths). Not observable by LazyFS (it drops file data, not entries). |
+| R-05 Low, strength estimate accepts known-weak passwords | Valid; all seven examples reproduced (53.9 to 65.7 bits). | `cli::strength_bits`: keyboard graph with columns and diagonals (4 rows of 10 keys, shifted digits on the digit row; a key's neighbours below are the same and the previous column); leet undone before the word lookup (`4@`→a, `3`→e, `1!`→i, `0`→o, `5$`→s, `7`→t); four breach-corpus roots the word list lacks (`iloveyou`, `loveyou`, `letmein`, `trustno1`); a year 1900–2099 = log2(200) = 7.64 bits; a separator right after a word or other token: 2 bits if one of space `-` `_` `.`, 0 if it repeats the previous separator, otherwise its class. Now 18.3 to 46.0 bits for the seven; strong examples still pass (a random 16-letter lower-case string 67.8, a generated 6-word passphrase 90). The seven are in `weak_master_passwords_are_refused`; two are T-E2E-1 refusal cases. One detail case changed its example: `kxmkx` became `kxbkx`, because `m` now touches `k` diagonally; the asserted value and the rule tested (a pair seen before) are unchanged. |
+| R-06 Low, T-ENG-4 narrower than S1 | Valid as a test gap (no live use). | `clippy.toml` bans `OpenOptions::open`, `fs::copy`, `fs::rename`, `fs::hard_link` (positive control: each fires from `src/`). New `t_eng_4_file_primitives_only_in_store`: only `store` names `open_at`, `rename_at`, `link_at`, `unlink_at`, `CreateNew` (positive control: `store` must name all five; negative control: a call in `cli` fails it). Ten test functions that tamper with files got item-level allows (tests only; `t_eng_4_ban_exemptions_scoped` binds `src/`). |
+| R-07 Low, T-MEM-4 gaps | Valid. | Two new T-MEM-4 tests. `t_mem_4_passwd_add_gen_names_and_keys`: canary entry name and field key, `add` with a generated value, `passwd` to a chosen P2 and then to a generated passphrase; mid-session no master password (old or new) anywhere, names, keys, and values only in the arena; after `lock` nothing. `t_mem_4_init_import_and_refusals_are_wiped`: `init` with the generated passphrase, `import` of a canary body (through a FIFO, so that `pwv` keeps the PTY's PID), a wrong password (exit 2), a refused rollback (exit 3), each scanned after the wipe. Controls: a heap copy of the imported body, and of the current password in `passwd`, each fail them naming canary and mapping. |
+| R-08 Low, panic skips the clipboard clear, exit 101 | Exit code: valid. Clipboard: the hand-over to a manager does not happen in practice (`clip` always sets the history hint, and arboard 3.7.0's `Drop` then skips the hand-over, `x11.rs` `ask_clipboard_manager_to_request_our_data`), but clearing was still skipped. | `impl Drop for Session` runs `expire_clip`; `main` wraps `cli::run` in `catch_unwind` → exit code 5 after every `Drop` ran. New `memtest`-only command `__panic` (Section 5.8 extended). Tests: `panic_exits_with_code_5_and_the_fixed_message` (101 without the fix), `x11::panic_exit_clears_the_clipboard` (CI, `e2e` job, new step). |
+| R-09 Info, unreadable clipboard left serving | Valid for Wayland (on X11 the owner reads its own data locally and cannot fail). Spec 11.3 step 3 said "if the read fails, still zero the slot" (no clear). | Deviation, fail closed: the clipboard is left alone only when the read shows it holds something else (other text; `ContentNotAvailable`: empty or another format; `ConversionFailure`: not UTF-8, so not ours); any other read error clears it. T-CLIP-3 (a foreign value is kept) is unaffected. Not testable here (no display); CI covers X11 only. |
+| R-10 Info, timing separates wrong password from damaged payload | Valid; measured: 1 µs against 144 µs (release, 464 KiB payload). | `open_inner`: after a failed unwrap the payload is still copied and authenticated under a fixed all-zero key (cannot match), then the unwrap's `Auth` is returned (error precedence unchanged). Measured after: 144 µs both. (The stand-in key is now the KEK itself, not a constant: entry "PR run of the review and mutation fixes" below.) One-off measurement, not a CI test (timing tests flake). |
+| R-11 Info, backups survive `passwd` | Valid. Re-encrypting them is not possible in general (backups older than an earlier `passwd` use DEKs that are gone). | `passwd` prints a notice; new option `passwd --purge-backups` deletes `.1` to `.5` after the durable save and `fsync`s the directory (`Store::purge_backups`). README and THREAT_MODEL (a dated section outside the verbatim Sections 2 and 18). Tests: `purge_backups_deletes_exactly_the_backups` (store), `passwd_notice_and_purge_backups` (e2e). |
+| R-12 Info, `passwd`/unlock lifecycle | Valid. | `tidy` also clears `Kek` and `NewDek`; `passwd` checks `KdfParams::for_write` before any prompt; the 5.4 notice is printed also when the password proves wrong: `vault::unlock` is split into `vault::derive` + `open_with_kek` (its signature is kept for tests and fuzz targets), and `cli` prints the notice between them. Test: `passwd_checks_parameters_first_and_kdf_notice_on_failure` (memlock lowered to at most 4 MiB, never raised; fails without the fix). |
+| R-13 Info (A8), word lookup time ∝ index | Valid, out of scope, cheap to remove. | `gen::OFFSETS`, a `const` reference to a table of 205,690 word offsets computed by a `const fn` at compile time (a short list fails the build); lookup is O(1). A `static` would be simpler but T-ENG-3 bars statics. Compile cost about 2 s per build of the library; the binary grows by 0.8 MB. Checked that no copy reaches the stack (a passphrase generated on a 256 KiB thread stack). Under Miri the constant is evaluated lazily in the test crate, where the item's `allow(long_running_const_eval)` does not apply, so `tests/gen.rs` allows that lint crate-wide. `word_draw_first_middle_and_last_index` under Miri: 4m50 locally (13m03 before). |
+| R-14 Info, comment bound | Valid: a new field adds 1 + 64 + 1 + 2 + 4,096 = 4,164 bytes. | Comment rewritten with the exact argument: the new padded length is at most `live.len() + 2 * BLOCK` (not "below"); the code needs only "at most". |
+| R-15 Info, T-CRY-1 tolerance | Valid as a precision issue. | The sweep now accepts `Format` only when `format::split_file` itself refuses the flipped file, `Auth` only when it accepts it, counts both, and requires every payload and tag flip to be `Auth`; the full-path cases likewise. Stricter than before. |
+
+**Deviations from the owner's specification** (the owner's copy is not
+edited here; `docs/SPECIFICATION.md` is updated): 5.8 (`__panic`, and
+the exit pause of M8, listed); 6.5 (the strength rules above); 9.2
+(`passwd --purge-backups`, parameters checked first); 11.3 step 3 (clear
+when the clipboard cannot be read); 14.3 T-CRY-1 (criterion as above);
+14.9 T-MEM-4 (the added scenarios); 14.11 T-ENG-4 (the added bans and the
+`sys` primitive check). 12.2 step 1 is now implemented as written.
+
+**CI.** `e2e`: a new step runs `x11::panic_exit_clears_the_clipboard`
+(memtest, X11); the M8 gate by name lists it and the two new T-MEM-4
+tests. `scripts/test_ids.py`: T-MEM-4 and T-ENG-4 name the new tests.
+
+**LOC** (caps unchanged): `store` 409 → 429 / 450, `vault` 486 → 495 /
+500, `gen` 268 → 294 / 300, `term + clip` 279 → 285 / 350, `sys + secmem
++ alloc` 707 → 711 / 800, `cli + main` 1,633 → 1,685 / 1,700, total 4,478
+→ 4,595 / 4,800. `vault`, `gen`, and `cli + main` have little room left.
+
+## 2026-11-18 — First weekly `mutants.yml` run: results and fixes
+
+**Which tree.** The run (owner's report) tested `main` *without* the
+review fixes above: every reported position matches the pre-review tree
+(for example `src/vault.rs:274` was `adopt_dek`, `src/store.rs:338` the
+header-length check in `open_as`). Results: `format` 1/3, `crypto` 0/1,
+`gen` 1/2 and `vault` 2/4 green; `format` 0/3 and 2/3 and all three
+`store` shards failed `mutants_check.py` (unjustified survivors);
+`gen` 0/2 and `vault` 0/4, 1/4 and 3/4 were cancelled at the 350-minute
+limit. Below, each mutant is named by its position in the current tree.
+
+**Cause of the four cancellations: `scripts/mutants.sh`, not slow
+mutants.** The workflow sets `CARGO_TERM_COLOR=always`, which
+cargo-mutants 27.1.0 also reads as `--colors`. The `--list` output that
+passes 2 and 3 are built from then carries ANSI escapes inside every name
+(checked locally: `replace ^[[38;5;13moffsets^[[0m ...`), so no survivor
+matched it, `previously_caught.txt` held every mutant, and `--iterate`
+excluded nothing: pass 2 re-tested the whole module against the full
+suite ("Iteration excludes 82 ... Found 82 mutants to test"), about 9
+minutes per mutant, then pass 3 again. The local trial of 2026-11-18 ran
+without the variable, so it did not show this. Fix: `--colors never` on
+the `--list` call, and a guard that fails the job at once if any survivor
+is not a name of the list (so a format change can never again silently
+re-test everything). Checked locally with `CARGO_TERM_COLOR=always`: with
+the real `missed.txt` of a `vault` run, `--iterate` excludes 99 of 103
+mutants and lists exactly the 4 survivors; the old command matched 0. The
+guard fires on a coloured name and stays quiet on real names and on an
+empty list. Expected cost now: a shard's pass 1, plus two full-suite
+baselines (about 12 min each on CI) and about 9 to 13 min per survivor in
+each of passes 2 and 3. The one hanging `gen` mutant (`replace || with &&
+in sample`, a pass-1 timeout) still costs up to the auto timeout (about
+60 min) in each of passes 2 and 3 and then counts as caught; `gen` 0/2 is
+estimated at about 4 h of 5 h 50.
+
+**Survivors: verdict and change.** Tests were written against the
+documented behaviour through the public interface where there is one,
+not against the mutated expression; the equivalent mutants are justified
+below rather than tested.
+
+| Reported (pre-review position) | Verdict | Change |
+| --- | --- | --- |
+| `format.rs:23:40` and `23:54` `replace + with *` (`MAX_FILE`) | Valid gap. `MAX_FILE` bounds only the copy fallback of `save` (no hard links), which reads the current vault into memory; nothing tested a current file larger than any vault. | `store::tests::copy_fallback_reads_at_most_the_largest_vault`: a current vault grown (sparse) to exactly the largest valid size (Section 7: header + 16 MiB + tag, computed from the parts) is copied; one byte more is refused with `FileLength` before anything is written. Both mutants caught. |
+| `format.rs:571:22` `replace < with <= in parse_body` | Equivalent: the line before already refused `p == e.name`. | The two checks are one three-way comparison (`match p.cmp(name)`: `Equal` → `NameDuplicate`, `Greater` → `NameOrder`); same behaviour, no redundant comparison left to mutate. Existing duplicate and order tests unchanged and passing. |
+| `store.rs:338:17` (now `354:17`) `replace < with <= in Store::open_as` | Valid gap: no test opened a vault whose length does not match its header. | `tests/store.rs` `open_refuses_a_vault_whose_length_does_not_match_its_header`: cuts at 0, 1, header − 1 (`HeaderLength`), header, header + 1, full − 1, and one byte appended (`FileLength`), file left unchanged; then the intact file opens. Caught. |
+| `store.rs:473:49` (now `506:49`) `replace / with % in Store::write_atomic` | Valid as a weakness of T-STORE-2: with `% 2` an even-length write puts nothing before the "partial write" fault point, so that case silently repeated "create temp". | T-STORE-2 (`t_store_2_crash_at_every_step`) now checks that a crash at "partial write" leaves exactly one temporary file holding a non-empty strict prefix of the file being written (the copy to `.1`, the vault, or the state). Caught. |
+| `store.rs:508:84` (now `541:84`) `replace > with ==` and `with >=` in `Store::read_state` | Valid gap, and the `==` variant hides a real failure mode: the existing over-1-MiB case used unparsable bytes, so refusing and truncating looked the same. Truncating a well-formed file would drop the rows after 1 MiB, this vault's among them, and with them rollback detection. | `tests/store.rs` `state_file_limit_refuses_and_never_truncates`: a well-formed state file of exactly 1 MiB (64-byte rows) whose last row is this vault's is read whole (rollback detected); the same rows behind one more are refused (`Error::State`). Both caught. |
+| `vault.rs:274` `adopt_dek` (2 mutants, `vault` 0/4 pass 1) | Not survivors: caught by the full suite in pass 2 (`passwd` end-to-end tests). | None. |
+| `vault.rs:364:40` (now `390:40`) `replace + with * in rewrite` | Equivalent: `room` clamps every request to the slot's capacity, so a larger request only enlarges the zeroed working area; the output is identical. | Justified below. |
+| `vault.rs:629:59` (now `655:59`) `replace + with * in Model<'a>::merge` | Not equivalent: caught locally by the new `vault` tests of this entry. | — |
+| `vault.rs:629:69` (now `655:69`) `replace + with * in Model<'a>::merge` | Equivalent, as `390:40`. | Justified below. |
+| `vault.rs:629:69` (now `655:69`) `replace + with - in Model<'a>::merge` | Equivalent by the format's minimum sizes (argument below). | Justified below. New `tests/vault.rs` `import_capacity_rule_when_every_entry_clashes` covers the worst case the argument rests on (smallest entries, every one suffixed), which `import_capacity_rule` did not; it confirms the margin but cannot kill this mutant. |
+| `vault.rs:656:21` (now `682:21`) `replace > with ==` and `with >=` in `Model<'a>::merge` | Valid gap: Section 7.2 allows N ≤ 10,000; the limit test checked that `add` may reach it but not `import`. | `field_and_entry_limits`: after one `rm`, an import of one entry reaches exactly 10,000 and is accepted. Both caught (and `with <`). |
+| `gen.rs:257:43` (now `286:43`) `replace > with >= in sample` | Valid gap: `sample` documents at most 32 classes; the test refused 33 but never served 32 (for the alphabet it checks both 256 and 257). | `sample_rejects_malformed_input`: 32 one-character classes, length 128, accepted with every class present. Caught. |
+| `gen.rs` 0/2: eight pass-1 timeouts (`map_draw`, `draw`, `sample`) | Not survivors: in pass 2 seven were caught, `replace \|\| with && in sample` timed out again (counts as caught in pass 3). | None (cost noted above). |
+
+Verified locally with cargo-mutants 27.1.0, each mutant against the
+module's tests: every "caught" above, and the three equivalent ones
+missed as expected. The mutants of code new since the review were run
+too, so the next weekly run holds no surprise there: `create_dirs` and
+`purge_backups` 6/6 caught; `gen::offsets` and `words` 10 caught, 6
+unviable (compile-time evaluation fails); the new `parse_body` comparison
+caught; `vault::derive` unviable. Not verified here: the whole workflow,
+which only CI runs.
+
+### Surviving mutants (weekly run of 2026-11-18)
+
+Read by `scripts/mutants_check.py`, as the table of the M9 entry.
+
+| Mutant | Date | Reason |
+| --- | --- | --- |
+| `src/vault.rs:390:40: replace + with * in rewrite` | 2026-11-18 | Equivalent. `room(scratch, n)` takes `min(n, capacity)`; the mutant asks for `live.len() * 2 * BLOCK` instead of `live.len() + 2 * BLOCK`, never less for a live body of at least one block, so `rewrite` gets the same or a larger working area and writes the same bytes; only the amount zeroed differs. |
+| `src/vault.rs:655:69: replace + with * in Model<'a>::merge` | 2026-11-18 | Equivalent, as above: `live + 5·len · BLOCK` is never less than `live + 5·len + BLOCK`, and `room` clamps it. |
+| `src/vault.rs:655:69: replace + with - in Model<'a>::merge` | 2026-11-18 | Equivalent: `room` is then `live + 5·len − BLOCK` and the merge area `live + 4·len − BLOCK`. An entry takes at least 5 bytes (u16 name length, 1-byte name, u16 field count), only the 94 printable ASCII bytes are 1-byte names, and a clash adds the 11-byte suffix. For an import of one block (`len = BLOCK`) the import's content plus all suffixes is at most 94·16 + 602·17 = 11,738 bytes, so the merged body pads to at most `live + 3·BLOCK`, which is exactly the area left; for `len = k` blocks (k ≥ 2) the bound is about 3.2·len + BLOCK < 4·len − BLOCK. `import_capacity_rule_when_every_entry_clashes` exercises this worst case. The `+ BLOCK` in the code is slack, kept. |
+
+**LOC:** `format` +1 line (the comparison); `crypto + format` 696 → 697 /
+750. Other changes are tests and `scripts/mutants.sh`.
+
+## 2026-11-18 — Coverage gate failure on the review-fix PR
+
+**What failed.** The PR run of the review fixes (`git_patch` only; the
+mutation fixes above were not yet pushed) failed `coverage-report`, and
+with it `ci-ok`. Every test passed; the report's gates failed:
+`gen.rs` T-COV-1, T-COV-2, T-COV-4; `clip.rs` T-COV-4; 20 uncovered
+gated lines or functions not justified. Diagnosed from the job summary
+and the artefact's `merged.lcov`.
+
+**Causes and fixes.**
+- **`gen.rs` (lines 92.93 % against 95 %, `offsets` uncovered; 14 lines
+  and the function).** The R-13 offset table is built by a `const fn`
+  evaluated by the compiler; coverage only counts code that runs, and
+  nothing called `offsets` at run time. A justification would not help:
+  the report keeps justified lines in the percentage, so T-COV-1 and
+  T-COV-4 would still fail. Fix: a unit test (`gen::tests::
+  offsets_start_every_word_of_the_list`) builds the table again at run
+  time with the same `const fn` and checks it against an independent
+  split of the list and against the compiled table. It is a `#[cfg(test)]`
+  item, so the LOC count is unchanged; Miri runs named integration tests
+  only, so no Miri job grows.
+- **`store.rs:436` (new: `purge_backups`' error arm).** Tested, not
+  justified: `purge_backups_reports_a_backup_it_cannot_delete` plants a
+  directory at `.3`, which `unlink` refuses with `EISDIR` (for root
+  too), and expects `Error::Io` with the vault untouched.
+- **`store.rs:284, 310, 484` and `vault.rs:334`.** Not new: the
+  2026-11-17 exceptions `store.rs:268, 294, 451` and `vault.rs:311`,
+  moved by the review fixes (+16 `create_dirs`, +17 `purge_backups`,
+  +23 `vault::derive`). Same code, checked line by line against the
+  pre-review tree; the table rows now carry the current numbers (and the
+  `vault` row's reference to line 310 now says 333). The review-fix
+  commit should have moved them; no gate catches a stale row until the
+  coverage run, so moving code above a justified line needs this check.
+- **`clip.rs` T-COV-4 (lines 82.35 % against a baseline of 87.5 %).** The
+  R-09 arms (lines 100, 101, 129) added three uncovered lines to a small
+  file. Two tests: `copy_refuses_values_it_cannot_serve` (every build:
+  non-UTF-8 text and a value over the 1 KiB `Clip` slot are refused
+  before the clipboard is touched, the slot is emptied, all four
+  messages fixed and distinct; covers lines 34 and 35) and
+  `x11::a_foreign_non_text_clipboard_is_not_cleared` (another client
+  owns the clipboard as `image/png` only; at the deadline and at exit
+  pwv leaves it alone; covers 100 and 129). Expected 46 of 51 lines
+  (90.2 %). Line 101 (`Err(false)`, the clipboard cannot be read at all)
+  stays uncovered: on X11, arboard 3.7.0 reports a selection owner that
+  never answers as `ContentNotAvailable` (a 4 s timeout, `x11.rs`
+  `read_single`), and pwv's own value is read locally while it owns the
+  selection, so only a failing X connection reaches that arm. That is
+  correct (another owner means our value is no longer served); on
+  Wayland, `ClipboardEmpty`/`NoMimeType` map to `ContentNotAvailable` and
+  every other failure to `Unknown`, as R-09 assumed. `clip` is not a
+  gated module, so no justification is needed.
+
+**Checked locally:** the new tests pass (the X11 one returns at once
+without a display; the coverage and `e2e` jobs run it under `xvfb-run`
+with `PWV_REQUIRE_X11`). The report's own `exceptions()` parses the
+updated table, and replaying the CI's uncovered list against it leaves
+nothing unjustified once `offsets` and `store.rs:436` are covered. Not
+checked here: the coverage percentages themselves (no `llvm-tools` in the
+sandbox); the next PR run measures them.
+
+## 2026-11-18 — PR run of the review and mutation fixes: `e2e` and both `coverage` jobs; CodeQL
+
+**What failed.** `e2e`, `coverage (default)` and `coverage (memtest)`,
+hence `ci-ok`; one test in all three:
+`x11::a_foreign_non_text_clipboard_is_not_cleared` panicked at its
+precondition, `assert!(xclip_out("UTF8_STRING").is_none(), "no text on
+offer")`. Every other test passed in every job; the coverage jobs fail on
+any test failure (`--no-fail-fast`, exit 101), after writing the report.
+
+**Cause: the test, not pwv.** The test assumed that
+`xclip -i -t image/png` offers that target only and refuses text. It does
+not: xclip answers a request for any target other than `TARGETS` with its
+data, with the property typed `image/png`; `xclip -o -t UTF8_STRING`
+does not check the type, so it printed `not text`. The coverage artefact
+shows what pwv did with that owner: `clip.rs` line 101 (`Err(false)`,
+"cannot be read") was covered and line 100 (`ContentNotAvailable`) was
+not. arboard 3.7.0 `x11.rs` `handle_read_selection_notify` accepts a
+reply only if its type is the requested target or `INCR`, and otherwise
+returns `Error::Unknown("incorrect type received from clipboard")`, which
+pwv maps to "cannot be read" and so clears (fail closed, R-09). That is
+the designed behaviour; the 2026-11-18 coverage entry's statement that
+only a failing X connection reaches line 101 was wrong: a non-conforming
+owner does too.
+
+**Fixes.**
+- `a_foreign_non_text_clipboard_is_not_cleared` now uses a conforming
+  owner written with x11rb (`image_owner`, a thread like the mock
+  clipboard manager): it owns CLIPBOARD, lists `TARGETS` and
+  `image/png`, serves `image/png`, refuses every other target with
+  property `None` (ICCCM 2.2), and records a `SelectionClear`. The test
+  checks the refusal with xclip, then that the owner kept the selection
+  and its data at the deadline and at exit. arboard then gets
+  `ContentNotAvailable` for every text target: line 100.
+- New `an_unreadable_clipboard_is_cleared_at_exit` keeps the xclip case
+  as the fail-closed test: copy, `xclip -t image/png` takes the
+  clipboard, `quit`; afterwards nothing serves `image/png` and there is
+  no text. Covers line 101. With line 100 covered too, the only `clip.rs` line
+  this run's lcov left uncovered is 75.
+
+**CodeQL "hard-coded cryptographic value" (`vault.rs`, `ZERO_KEY`).**
+Not exploitable: the all-zero key only verified the payload tag after a
+failed unwrap (R-10, equal work for both failures), its result was
+discarded, the unwrap's error was returned first and `open` wiped
+`body`; nothing was ever sealed under it. But the alert is fair on two
+counts: it is a constant key in a crypto path, and the comment's "cannot
+match" was false (anyone can seal a payload under the zero key; still
+harmless, since the result is ignored). Fix: the stand-in key is the KEK
+just derived from the entered password: the right length, secret, never
+the DEK, no new failure path (a random key would add an RNG error and an
+uncovered line). Nothing is sealed under it, so no nonce reuse arises.
+The edit keeps `vault.rs` the same number of lines, so the coverage
+exception `vault.rs:334` and the surviving-mutant rows `390:40` and
+`655:69` still point at the same code (checked); tokei: vault 492/500.
+
+**Checked locally:** fmt; clippy in the five `--all-targets` configs and
+the fuzz targets; the `cfg(miri)` compile checks for the lib and
+`vault`; full `cargo test --features memtest,testkdf` (all pass; the X11
+tests return at once without a display); `test_ids.py`; LOC budget.
+**Not checked here** (no X server or xclip in the sandbox): the two
+X11 tests themselves and the coverage figures; the next PR run is the
+first to execute them. CodeQL reruns on the push.
+
+## 2026-11-18 — CodeQL "hard-coded cryptographic value": the other alerts
+
+Triage of the twelve alerts (ten lines; 180 and 184 twice each) left after `ZERO_KEY` (line numbers as CodeQL
+reported them on the pushed tree):
+
+| Alert | Verdict | Action |
+|---|---|---|
+| `src/vault.rs:134` `salt: [0; 32]` (`keyslot`) | Not a defect: `fill_random(&mut h.salt)?` overwrote it before `derive_kek` saw it, and a generator failure returned first. The query cannot see a write through `&mut`. | Changed anyway: `salt: crypto::random()?`. |
+| `src/crypto.rs:285` `let mut nonce = [0u8; NONCE_LEN]` (`wrap_dek`) | Not a defect, the same pattern. | `let nonce: [u8; NONCE_LEN] = random()?;` |
+| `tests/crypto.rs` 58, 171, 180, 184, 212, 244, 479 (now 495) | Intended: fixed inputs keep the tests deterministic. 171 is a 31-byte key that `wrap_dek` must refuse; 479 is a wrong KEK that must fail; the rest are fixed keys and salts for KDF, seal and open checks. Random values would only make failures irreproducible. | None in code; dismiss as "Used in tests". |
+| `fuzz/fuzz_targets/fuzz_open.rs:60` `&[0x4b; 32]` | Intended: a fixed KEK keeps fuzz runs and crash reproductions deterministic. | None in code; dismiss as "Used in tests". |
+
+**`crypto::random::<N>()`.** Returns a fresh array from
+`getrandom::fill_uninit` on a `MaybeUninit` buffer, converted with the
+safe `<[u8; N]>::try_from`, so no constant array ever exists. The
+alternative was dismissing the two `src` alerts, but the pattern "zeroed,
+then filled" is exactly what a missed fill would look like, so removing it
+is worth 15 lines. The chain `ok().and_then(..).ok_or(..)` has no
+closure that runs only on failure, so it adds no uncovered region to
+`crypto.rs` (regions are gated by T-COV-4 at 96.98 % − 0.5 pp). The
+payload nonce in `vault::save` uses it too (not flagged, the same
+pattern); the vault ID and the temporary-file suffix in `store` are not
+cryptographic inputs and keep `fill_random`.
+
+`vault.rs` keeps its line count (a comment replaces the removed fill), so
+the coverage exception `vault.rs:334` and the mutant rows `390:40` and
+`655:69` still hold (checked). `crypto.rs` lines after `fill_random` move down by 16 (15
+after `wrap_dek`);
+no current table cites a `crypto.rs` line (the `197:69` mentions are
+history).
+
+**Why the tests are not changed or excluded in configuration.** The
+repository uses CodeQL default setup (no workflow, no config file), which
+cannot exclude paths; an advanced-setup workflow with `paths-ignore` would
+add a pinned workflow to maintain for the test and fuzz alerts. Dismissing each
+with GitHub's "Used in tests" reason records the judgement where the
+alert lives.
+
+**Checked locally:** fmt; clippy in the five `--all-targets` configs and
+the fuzz targets; `cfg(miri)` compile checks for the lib (both) and
+`crypto`; full `cargo test --features memtest,testkdf`; `test_ids.py`;
+LOC budget (crypto + format 703/750, vault 491/500); cargo-mutants on
+`random` (both mutants, `Ok([0; N])` and `Ok([1; N])`, caught by
+`tests/crypto.rs`). **Not checked here:** whether CodeQL closes the two
+`src` alerts (it reruns on push).
+
+## Changes to the owner's specification
+
+**Applied 2026-11-18 at the owner's request** to the owner's copy (kept
+outside the repository): items 1 to 7 below, exactly the
+`docs/SPECIFICATION.md` hunks of the review fixes (all seven applied
+cleanly; every added line checked identical in both files; nothing else
+in the owner's copy changed). The item "for the owner to decide" at the
+end was not applied. Each "now" passage below is the text that was
+replaced. They come from the review fixes ("M9 independent review"
+above) and M8's exit pause; the mutation and coverage fixes need none.
+
+1. **Section 5.8, `memtest` introspection.** Now: "The feature `memtest`
+   therefore does three things:" with three bullets ending "it adds a
+   `__pause` REPL command that blocks until the harness signals."
+   Proposed: "does the following:" and two more bullets: "it adds a
+   `__panic` command that panics, so that tests reach the unwinding path
+   (clipboard cleared, exit code 5);" and "with `PWV_MEMTEST_EXIT_PAUSE`
+   set, it pauses after the wipe, before exit, for a last scan." (R-08,
+   M8.)
+2. **Section 6.5, master-password policy.** Now: "It penalises repeated
+   runs, sequences, keyboard rows, and words of the embedded list."
+   Proposed: "It penalises repeated runs, sequences, keyboard walks
+   (rows, columns, and diagonals, shifted digits included), words of the
+   embedded list and a few common roots it lacks (also in "leet"
+   spelling), years 1900–2099, and common or repeated separators between
+   words." (R-05.)
+3. **Section 9.2, command table, `passwd` row.** Now: "`passwd
+   [--kdf-memory] [--kdf-time]` | … | Current password re-entered; new
+   password twice; strength policy (E3)". Proposed: "`passwd
+   [--kdf-memory] [--kdf-time] [--purge-backups]` | … | KDF parameters
+   checked before any prompt; current password re-entered; new password
+   twice; strength policy (E3). The backups still open with the old
+   password: a notice says so, and `--purge-backups` deletes them after
+   the durable save". (R-11, R-12.)
+4. **Section 11.3 step 3, clipboard expiry.** Now: "… Then zero the `Clip`
+   slot. If the read fails, still zero the slot. …" Proposed: "… Then zero
+   the `Clip` slot. If the clipboard demonstrably holds something else
+   (other text, nothing, another format, text that is not UTF-8), leave
+   it. If it cannot be read at all, set it to the empty string anyway
+   (fail closed: on Wayland the value would otherwise be served until
+   replaced). Zero the slot in every case. …" (R-09; a change of
+   behaviour, not only of wording.)
+5. **Section 14.3, T-CRY-1 pass criterion.** Now: "Every case fails
+   authentication". Proposed: "Every case fails authentication, except
+   flips that the format layer itself refuses first
+   (`format::split_file`); those are counted separately, and every
+   payload and tag flip fails authentication". (R-15.)
+6. **Section 14.9, T-MEM-4.** Add to the test: "Also: an entry name and
+   field key as canaries, `add` with a generated value, `passwd` to a
+   chosen password and to a generated passphrase (scanned mid-session);
+   `init` with the generated passphrase, `import` of a canary body from a
+   pipe, a wrong password, and a refused rollback (each scanned after the
+   wipe)". Pass criterion now: "Mid-session: matches only inside the
+   arena; P found nowhere. After lock: zero matches anywhere". Proposed:
+   "Mid-session: matches only inside the arena; no master password (old
+   or new) found anywhere. After lock or any exit: zero matches
+   anywhere". (R-07.)
+7. **Section 14.11, T-ENG-4.** Now: "… `rand::thread_rng`, `std::fs::write`
+   and `File::create` outside `store`". Proposed: "… `rand::thread_rng`,
+   `std::fs::write`, `File::create`, `OpenOptions::open`, `fs::copy`,
+   `fs::rename`, and `fs::hard_link` outside `store`; and only `store`
+   calls the `sys` file primitives (`open_at`, `rename_at`, `link_at`,
+   `unlink_at`)". (R-06.)
+
+For the owner to decide (not a deviation): Section 8.4 does not bound the
+state file. The code refuses one over 1 MiB (`STATE_MAX`), and a test now
+holds it to refusing, never truncating. Stating "at most 1 MiB; a larger
+file is refused as damaged" in 8.4 would make that part of the contract.
+Section 12.2 step 1 ("stdin must be a pipe") needs no change: the code
+now does exactly that (R-03).

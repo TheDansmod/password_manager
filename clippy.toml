@@ -3,7 +3,9 @@
 # These bans apply crate-wide. The only permitted exceptions are an item-level
 # `#[allow(clippy::disallowed_methods)]` / `#[allow(clippy::disallowed_macros)]`
 # in `src/term.rs` (std stdio) and `src/store.rs` (file creation). tests/eng.rs
-# fails the build if such an allow appears in any other file.
+# fails the build if such an allow appears in any other file, and also
+# requires that only `store` calls the `sys` file primitives (`open_at`,
+# `rename_at`, `link_at`, `unlink_at`), which these bans cannot see.
 #
 # Note: clippy.toml cannot set lint levels, so the `clippy::pedantic` set and
 # the deny list of spec Section 15.1 are enabled by crate attributes in
@@ -27,6 +29,11 @@ disallowed-methods = [
     { path = "std::fs::write", reason = "S1: file writes only through store's atomic protocol" },
     { path = "std::fs::File::create", reason = "S1: file writes only through store's atomic protocol" },
     { path = "std::fs::File::create_new", reason = "S1: file writes only through store's atomic protocol" },
+    # Review finding R-06 (2026-11-18): every other std route to file content.
+    { path = "std::fs::OpenOptions::open", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "std::fs::copy", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "std::fs::rename", reason = "S1: file writes only through store's atomic protocol" },
+    { path = "std::fs::hard_link", reason = "S1: file writes only through store's atomic protocol" },
     { path = "rand::thread_rng", reason = "S3: getrandom only", allow-invalid = true },
     { path = "rand::rng", reason = "S3: getrandom only", allow-invalid = true },
 ]

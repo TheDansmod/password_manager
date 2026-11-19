@@ -14,6 +14,43 @@ mod common;
 #[global_allocator]
 static GLOBAL: pwv::alloc::ZeroizingAlloc = pwv::alloc::ZeroizingAlloc::new(true);
 
+/// `copy` refuses a value it cannot serve before it touches the
+/// clipboard: text that is not UTF-8, and a value longer than the 1 KiB
+/// `Clip` slot (field values may be up to 4 KiB). The slot is left empty,
+/// and every error has a fixed, printable message of its own. Runs in every
+/// build, with or without a display.
+#[test]
+fn copy_refuses_values_it_cannot_serve() {
+    use pwv::clip::{Clip, Error};
+    let mut a = common::vaults::arena();
+    let mut s = a.slots().expect("slots");
+    let too_long = vec![b'a'; s.clip.capacity() + 1];
+    let mut clip = Clip::default();
+    for (value, want) in [
+        (&b"\xff\xfe"[..], Error::Utf8),
+        (&too_long[..], Error::Capacity),
+    ] {
+        common::vaults::put(&mut s.clip, b"stale");
+        assert_eq!(clip.copy(value, &mut s.clip), Err(want));
+        assert!(s.clip.is_empty(), "{want:?}: slot not cleared");
+    }
+    let all = [
+        Error::Unsupported,
+        Error::Unavailable,
+        Error::Utf8,
+        Error::Capacity,
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for e in all {
+        let m = e.message();
+        assert!(
+            !m.is_empty() && m.bytes().all(|b| (b' '..=b'~').contains(&b)),
+            "{e:?}"
+        );
+        assert!(seen.insert(m), "{e:?}: message shared with another variant");
+    }
+}
+
 #[cfg(feature = "clipboard")]
 mod x11 {
     use super::common;
@@ -225,6 +262,195 @@ mod x11 {
         assert!(clipboard_is("other client"), "cleared at exit");
     }
 
+    /// Review finding R-09 (Section 11.3 step 3): a clipboard that another
+    /// client holds in a format other than text demonstrably does not hold
+    /// our value, and is left alone at the deadline and at exit (T-CLIP-3
+    /// covers foreign text). The other client is [`image_owner`].
+    #[test]
+    fn a_foreign_non_text_clipboard_is_not_cleared() {
+        if !display() {
+            return;
+        }
+        let _x = turn();
+        let home = seeded();
+        let mut p = open(&home, &["--clip-timeout", "5"]);
+        p.send("copy site\n");
+        assert!(p.expect("Copied. Clearing in 5 s."));
+        assert!(clipboard_is(SECRET));
+        let (stop, ready, lost) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let thread = {
+            let (stop, ready, lost) = (stop.clone(), ready.clone(), lost.clone());
+            std::thread::spawn(move || image_owner(&stop, &ready, &lost))
+        };
+        assert!(
+            eventually(Duration::from_secs(10), &|| ready.load(Ordering::SeqCst)),
+            "the image owner did not take the clipboard"
+        );
+        let image = || xclip_out("image/png").is_some_and(|v| v == b"not text");
+        assert!(image(), "the other client owns the clipboard");
+        assert!(xclip_out("UTF8_STRING").is_none(), "no text on offer");
+        std::thread::sleep(Duration::from_secs(7));
+        assert!(!lost.load(Ordering::SeqCst), "taken at the deadline");
+        assert!(image(), "a foreign image was cleared at the deadline");
+        p.send("quit\n");
+        assert_eq!(p.exit_code(), Some(0));
+        assert!(!lost.load(Ordering::SeqCst), "taken at exit");
+        assert!(image(), "a foreign image was cleared at exit");
+        stop.store(true, Ordering::SeqCst);
+        thread.join().expect("image owner");
+    }
+
+    /// The fail-closed half of R-09: a clipboard pwv cannot read is set to
+    /// the empty string at exit. `xclip -t image/png` answers a request for
+    /// text with its data typed `image/png`; arboard 3.7.0 reports that as
+    /// `Error::Unknown` ("incorrect type received"), not as a missing
+    /// format, so pwv cannot tell what the clipboard holds and clears it.
+    /// (The first CI run of `a_foreign_non_text_clipboard_is_not_cleared`,
+    /// which used xclip, reached this arm: `clip.rs` line 101 was covered
+    /// and line 100 was not.)
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "tests spawn children; Section 5.7 binds the binary only"
+    )]
+    fn an_unreadable_clipboard_is_cleared_at_exit() {
+        if !display() {
+            return;
+        }
+        let _x = turn();
+        let home = seeded();
+        let mut p = open(&home, &["--clip-timeout", "300"]);
+        p.send("copy site\n");
+        assert!(p.expect("Copied. Clearing in 300 s."));
+        assert!(clipboard_is(SECRET));
+        let mut other = Command::new("sh")
+            .args([
+                "-c",
+                "printf 'not text' | xclip -i -selection clipboard -t image/png",
+            ])
+            .spawn()
+            .expect("xclip -i");
+        assert!(other.wait().expect("xclip -i").success());
+        assert_eq!(xclip_out("image/png"), Some(b"not text".to_vec()));
+        p.send("quit\n");
+        assert_eq!(p.exit_code(), Some(0));
+        assert!(
+            xclip_out("image/png").is_none(),
+            "an unreadable clipboard was left serving"
+        );
+        assert!(clipboard_empty());
+    }
+
+    /// A client that owns CLIPBOARD as `image/png` only and, as ICCCM
+    /// requires, refuses every other target (`SelectionNotify` with
+    /// property `None`); `TARGETS` lists `TARGETS` and `image/png`. Sets
+    /// `lost` if another client takes the selection.
+    ///
+    /// `xclip -i -t image/png` cannot play this part: xclip answers a
+    /// request for any target with its data, typed `image/png`, so
+    /// `xclip -o -t UTF8_STRING` printed the image (CI, 2026-11-18), and
+    /// arboard 3.7.0 reports the mistyped reply as `Error::Unknown`, which
+    /// pwv's `get` maps to "cannot be read" and clears (fail closed).
+    fn image_owner(stop: &AtomicBool, ready: &AtomicBool, lost: &AtomicBool) {
+        use x11rb::protocol::xproto::PropMode;
+        use x11rb::wrapper::ConnectionExt as _;
+        let (conn, screen) = x11rb::connect(None).expect("X connection");
+        let root = conn.setup().roots[screen].root;
+        let win = conn.generate_id().expect("id");
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            win,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new(),
+        )
+        .expect("window");
+        let atom = |name: &str| {
+            conn.intern_atom(false, name.as_bytes())
+                .expect("intern")
+                .reply()
+                .expect("atom")
+                .atom
+        };
+        let (clipboard, targets, png) = (atom("CLIPBOARD"), atom("TARGETS"), atom("image/png"));
+        let none = u32::from(AtomEnum::NONE);
+        conn.set_selection_owner(win, clipboard, x11rb::CURRENT_TIME)
+            .expect("own");
+        let owner = conn
+            .get_selection_owner(clipboard)
+            .expect("owner")
+            .reply()
+            .expect("owner")
+            .owner;
+        assert_eq!(owner, win, "could not take the clipboard");
+        ready.store(true, Ordering::SeqCst);
+        while !stop.load(Ordering::SeqCst) {
+            let Some(event) = conn.poll_for_event().expect("event") else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            match event {
+                Event::SelectionRequest(req) if req.selection == clipboard => {
+                    // ICCCM 2.2: an obsolete requestor names no property.
+                    let prop = if req.property == none {
+                        req.target
+                    } else {
+                        req.property
+                    };
+                    let served = if req.target == targets {
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            req.requestor,
+                            prop,
+                            AtomEnum::ATOM,
+                            &[targets, png],
+                        )
+                        .expect("targets");
+                        true
+                    } else if req.target == png {
+                        conn.change_property8(
+                            PropMode::REPLACE,
+                            req.requestor,
+                            prop,
+                            png,
+                            b"not text",
+                        )
+                        .expect("image");
+                        true
+                    } else {
+                        false
+                    };
+                    let reply = SelectionNotifyEvent {
+                        response_type: SELECTION_NOTIFY_EVENT,
+                        sequence: 0,
+                        time: req.time,
+                        requestor: req.requestor,
+                        selection: req.selection,
+                        target: req.target,
+                        property: if served { prop } else { none },
+                    };
+                    conn.send_event(false, req.requestor, EventMask::NO_EVENT, reply)
+                        .expect("notify");
+                    conn.flush().expect("flush");
+                }
+                Event::SelectionClear(c) if c.selection == clipboard => {
+                    lost.store(true, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// What the mock clipboard manager saw.
     #[derive(Default)]
     struct Seen {
@@ -419,5 +645,26 @@ mod x11 {
         p.signal(common::pty::Signal::SIGTERM);
         assert_eq!(p.exit_code(), Some(0));
         assert!(clipboard_empty(), "SIGTERM left the value on the clipboard");
+    }
+
+    /// Review finding R-08: a panic unwinds through the session, whose
+    /// `Drop` clears the clipboard; the exit code is 5.
+    #[cfg(feature = "memtest")]
+    #[test]
+    fn panic_exit_clears_the_clipboard() {
+        if !display() {
+            return;
+        }
+        let _x = turn();
+        let home = seeded();
+        let mut p = open(&home, &["--clip-timeout", "300"]);
+        p.send("copy site\n");
+        assert!(p.expect("Copied. Clearing in 300 s."));
+        assert!(p.expect(PROMPT));
+        assert!(clipboard_is(SECRET));
+        p.send("__panic\n");
+        assert!(p.expect("internal error"));
+        assert_eq!(p.exit_code(), Some(5));
+        assert!(clipboard_empty(), "a panic left the value on the clipboard");
     }
 }

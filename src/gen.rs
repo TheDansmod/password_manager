@@ -19,6 +19,35 @@ use zeroize::Zeroize;
 pub const WORDS: &str = include_str!("wordlist.txt");
 /// Number of words in [`WORDS`].
 pub const WORD_COUNT: u32 = 205_690;
+/// Byte offset of each word in [`WORDS`], computed at compile time, so that
+/// a lookup takes the same time for every index (review finding R-13: the
+/// line scan it replaces took time proportional to the index).
+#[allow(long_running_const_eval, reason = "one pass over the 2 MiB list")]
+const OFFSETS: &[u32; WORD_COUNT as usize] = &offsets();
+
+#[allow(
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::large_stack_arrays,
+    reason = "compile-time evaluation only: a bad index fails the build; the list is 2 MiB"
+)]
+const fn offsets() -> [u32; WORD_COUNT as usize] {
+    let mut out = [0; WORD_COUNT as usize];
+    let (mut at, mut n, mut rest) = (0usize, 1, WORDS.as_bytes());
+    while let [c, tail @ ..] = rest {
+        at += 1;
+        if *c == b'\n' && n < out.len() {
+            out[n] = at as u32;
+            n += 1;
+        }
+        rest = tail;
+    }
+    assert!(
+        n == out.len(),
+        "the word list has fewer than WORD_COUNT words"
+    );
+    out
+}
 /// Stage-2 attempts before [`Error::Attempts`] (Section 10.2).
 pub const MAX_ATTEMPTS: u32 = 10_000;
 /// Lower-case letters.
@@ -287,10 +316,11 @@ fn words(
     out: &mut SecretSlot<'_>,
 ) -> Result<(), Error> {
     for _ in 0..count {
-        let w = WORDS
-            .split_terminator('\n')
-            .nth(draw(rng, WORD_COUNT, 3)?)
+        let at = OFFSETS
+            .get(draw(rng, WORD_COUNT, 3)?)
             .ok_or(Error::WordList)?;
+        let w = WORDS.get(*at as usize..).and_then(|r| r.split('\n').next());
+        let w = w.ok_or(Error::WordList)?;
         let p = out.len();
         out.set_len(p + w.len() + 1).map_err(|_| Error::Capacity)?;
         for (d, s) in out
@@ -388,4 +418,33 @@ pub fn log2_count(sizes: &[u32], len: u32) -> Option<f64> {
         p += if even { t } else { -t };
     })?;
     Some(f64::from(len) * n.log2() + f64::log2(p))
+}
+
+/// Unit tests of the private offset table.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The offset table starts every word of the list. The compiler builds
+    /// it; built again at run time by the same `const fn` (the only way a
+    /// coverage run sees that code), it must equal both the compiled table
+    /// and the word starts of an independent split of the list.
+    #[test]
+    fn offsets_start_every_word_of_the_list() {
+        let mut starts = Vec::new();
+        let mut at = 0;
+        for w in WORDS.split_terminator('\n') {
+            starts.push(u32::try_from(at).unwrap());
+            at += w.len() + 1;
+        }
+        // 205,690 offsets (800 KiB) are returned by value: a large stack.
+        let built = std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| offsets().to_vec())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(built, starts);
+        assert_eq!(built, OFFSETS.to_vec());
+    }
 }

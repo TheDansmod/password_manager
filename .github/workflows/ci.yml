@@ -332,10 +332,17 @@ jobs:
           echo "PWV_LEGACY_PYTHON=$RUNNER_TEMP/legacy/bin/python" >> "$GITHUB_ENV"
       - name: T-MEM-4 (memtest), T-MIG, T-E2E-10 with the real gpg
         run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --no-fail-fast --features memtest --test mem --test mig 2>&1 | tee m8.txt
+      # Review finding R-08: the clipboard is cleared when a panic unwinds
+      # (`__panic` exists only in memtest builds).
+      - name: Panic path clears the clipboard (memtest, X11)
+        run: sh scripts/ci_guard.sh xvfb-run -a cargo test --locked --features memtest --test clip -- --exact x11::panic_exit_clears_the_clipboard 2>&1 | tee -a m8.txt
       - name: M8 gate by name (one line each in the log)
         run: |
           for t in scan::t_mem_4_canary_scan_mid_session_and_after_lock \
               scan::t_mem_4_signal_eof_and_idle_exits_are_wiped \
+              scan::t_mem_4_passwd_add_gen_names_and_keys \
+              scan::t_mem_4_init_import_and_refusals_are_wiped \
+              x11::panic_exit_clears_the_clipboard \
               scan::exit_pause_needs_the_environment_variable \
               scan::scan_skips_guard_pages_and_nothing_else \
               t_mig_1_legacy_fixture_imports_the_expected_model_with_its_warning \

@@ -14,6 +14,13 @@
 //! tests. T-GEN-3 (10^6 characters) and T-GEN-6 (SHA-256 of 2.2 MB) run
 //! natively only.
 
+#![allow(
+    long_running_const_eval,
+    reason = "under Miri the word list's offset table (`gen::OFFSETS`, review \
+              finding R-13) is evaluated lazily in this crate, where the allow \
+              in src/gen.rs does not reach"
+)]
+
 mod common;
 
 use common::vaults::arena;
@@ -1155,6 +1162,13 @@ fn sample_rejects_malformed_input() {
     assert_eq!(sample(&mut rng, &big[..256], 1, 4, &mut s.r#gen), Ok(()));
     let r = sample(&mut rng, &ab, 33, 4, &mut s.r#gen);
     assert_eq!(r, Err(Error::Length));
+    // 32 classes is the most, and is served: one character each, all of
+    // them present.
+    let all: Vec<(u8, u8)> = (0..32).map(|c| (b'A' + c, c)).collect();
+    assert_eq!(sample(&mut rng, &all, 32, 128, &mut s.r#gen), Ok(()));
+    for (c, _) in &all {
+        assert!(s.r#gen.expose().contains(c), "class of {}", char::from(*c));
+    }
     let r = sample(&mut rng, &ab, 2, 2000, &mut s.r#gen);
     assert_eq!(r, Err(Error::Capacity));
     assert!(s.r#gen.is_empty());

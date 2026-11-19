@@ -386,8 +386,9 @@ mod scan {
         (c3, c4)
     }
 
-    /// After the wipe: nothing anywhere, in either encoding.
-    fn assert_wiped(p: &mut Pty, all: &[Canary]) {
+    /// After the wipe: nothing anywhere, in either encoding; then the exit
+    /// with `code`.
+    fn assert_wiped(p: &mut Pty, all: &[Canary], code: i32) {
         assert!(p.expect("PWV_MEMTEST wiped"), "no pause after the wipe");
         let s = scan(p.pid(), all);
         s.assert_complete();
@@ -397,7 +398,7 @@ mod scan {
             assert_eq!(n, 0, "after the wipe: {} found at {at:?}", c.label);
         }
         p.signal(Signal::SIGUSR1);
-        assert_eq!(p.exit_code(), Some(0), "exit after the wipe");
+        assert_eq!(p.exit_code(), Some(code), "exit after the wipe");
     }
 
     #[test]
@@ -493,7 +494,7 @@ mod scan {
 
         // ---- `lock` wipes and pauses before exit.
         p.send("lock\n");
-        assert_wiped(&mut p, secrets);
+        assert_wiped(&mut p, secrets, 0);
     }
 
     /// The other exit paths wipe as well: a signal, end of input, and the
@@ -520,8 +521,166 @@ mod scan {
                 "eof" => p.send("\x04"),
                 _ => assert!(p.alive_after(Duration::from_secs(25)), "idle too early"),
             }
-            assert_wiped(&mut p, &canaries(&[("P", P), ("C1", C1)]));
+            assert_wiped(&mut p, &canaries(&[("P", P), ("C1", C1)]), 0);
         }
+    }
+
+    /// A canary entry name and field key (C6 is generated in `add`), and
+    /// `passwd`, first to a chosen password P2, then to a generated
+    /// passphrase G (review finding R-07). Mid-session: no master password,
+    /// old or new, anywhere; names, keys, and values in the arena only.
+    #[test]
+    fn t_mem_4_passwd_add_gen_names_and_keys() {
+        const N: &str = "CANARY-mem-N-name-7Rk";
+        const K: &str = "CANARY-mem-K-key-2Pq";
+        const P2: &str = "Hq4@CANARY-mem-P2-zzmrt8?pdxk3Wn";
+        let _x = turn();
+        let home = seeded();
+        let (mut p, arena) = session(&home, "300");
+        p.send(&format!("add {N}\n"));
+        assert!(p.answer("Field key (. to finish): ", K));
+        assert!(p.answer("gen [options]? [typed] ", "gen --len 27"));
+        assert!(p.answer("Field key (. to finish): ", "."));
+        assert!(p.expect(PROMPT));
+        p.send(&format!("reveal {N} {K}\n"));
+        assert!(p.expect("Press Enter to clear the screen. "));
+        let c6 = p
+            .between(&format!("reveal {N} {K}\r\n"), "\r\n")
+            .expect("C6");
+        assert_eq!(c6.len(), 27, "generated length");
+        p.send("\n");
+        assert!(p.expect(PROMPT));
+        p.send("passwd\n");
+        assert!(p.answer("Current master password: ", P));
+        assert!(p.answer("[Y/n] ", "n"));
+        assert!(p.answer("New master password: ", P2));
+        assert!(p.answer("Repeat: ", P2));
+        assert!(p.expect("Master password changed."));
+        assert!(p.expect(PROMPT));
+        let all = canaries(&[
+            ("P", P),
+            ("P2", P2),
+            ("N", N),
+            ("K", K),
+            ("C1", C1),
+            ("C6", &c6),
+        ]);
+        let s = paused_scan(&mut p, &all);
+        s.assert_complete();
+        for (k, c) in all.iter().enumerate() {
+            let (inside, outside) = (s.count(k, arena, true), s.count(k, arena, false));
+            let at = s.outside(k, arena);
+            assert_eq!(
+                outside, 0,
+                "after passwd: {} outside the arena: {at:?}",
+                c.label
+            );
+            // UTF-8 of N, K, C1, C6: stored, so in the arena. Nothing else.
+            let stored = k >= 4 && k % 2 == 0;
+            assert_eq!(
+                inside >= 1,
+                stored,
+                "after passwd: {} in the arena",
+                c.label
+            );
+        }
+        // `passwd` with the generated passphrase, shown once on screen.
+        p.send("passwd\n");
+        assert!(p.answer("Current master password: ", P2));
+        assert!(p.answer("[Y/n] ", ""));
+        assert!(p.expect("Press Enter to clear the screen. "));
+        let g = p
+            .between("Write it down:\r\n\r\n  ", "\r\n")
+            .expect("passphrase");
+        assert!(g.len() >= 6 * 3, "passphrase shown");
+        p.send("\n");
+        assert!(p.answer("Type the passphrase to confirm: ", &g));
+        assert!(p.expect("Master password changed."));
+        assert!(p.expect(PROMPT));
+        let more = canaries(&[("P2", P2), ("G", &g)]);
+        let s = paused_scan(&mut p, &more);
+        s.assert_complete();
+        for (k, c) in more.iter().enumerate() {
+            let at = s.outside(k, (0, 0));
+            assert!(at.is_empty(), "after passwd: {} found at {at:?}", c.label);
+        }
+        p.send("lock\n");
+        let mut every = all;
+        every.extend(more);
+        assert_wiped(&mut p, &every, 0);
+    }
+
+    /// Exit paths of review finding R-07, each scanned after the wipe:
+    /// `init` with the generated passphrase, `import` of a canary body
+    /// from a pipe, a failed unlock, and a refused rollback.
+    #[test]
+    fn t_mem_4_init_import_and_refusals_are_wiped() {
+        const W: &str = "CANARY-mem-W-wrong-pw-4Fj";
+        const N2: &str = "CANARY-mem-N2-imported-6Td";
+        const C7: &str = "CANARY-mem-C7-imported-9Xe";
+        let paused = |home: &Home, args: &[&str], script: Option<&str>| {
+            let mut cmd = home.command(args);
+            cmd.env("PWV_MEMTEST_EXIT_PAUSE", "1");
+            match script {
+                Some(sh) => Pty::spawn_shell(sh, cmd),
+                None => Pty::spawn(cmd),
+            }
+        };
+        // `init`: the passphrase is shown, typed back, and must be gone.
+        let fresh = Home::new();
+        let mut p = paused(&fresh, &["init", "--kdf-memory", "64"], None);
+        assert!(p.answer("[Y/n] ", ""));
+        assert!(p.expect("Press Enter to clear the screen. "));
+        let g = p
+            .between("Write it down:\r\n\r\n  ", "\r\n")
+            .expect("passphrase");
+        p.send("\n");
+        assert!(p.answer("Type the passphrase to confirm: ", &g));
+        assert!(p.expect("Vault created."));
+        assert_wiped(&mut p, &canaries(&[("G", &g)]), 0);
+
+        // `import` through a FIFO, so that `pwv` keeps the PTY's PID (a
+        // `|` would make it a child of the shell).
+        let home = seeded();
+        let old = std::fs::read(home.vault()).expect("vault");
+        let mut a = common::vaults::arena();
+        let mut slots = a.slots().expect("slots");
+        let body = vec![(
+            N2.to_owned(),
+            vec![("password".to_owned(), true, C7.to_owned())],
+        )];
+        common::vaults::write_body(&body, &mut slots.vault_a);
+        let octal: String = slots
+            .vault_a
+            .expose()
+            .iter()
+            .map(|b| format!("\\{b:03o}"))
+            .collect();
+        let fifo = home.dir.path().join("body.fifo");
+        let fifo = fifo.to_str().expect("path");
+        let sh = format!(
+            "mkfifo '{fifo}' && {{ printf '{octal}' > '{fifo}' & }} && exec \"$0\" \"$@\" < '{fifo}'"
+        );
+        let mut p = paused(&home, &["import", "--from-stdin"], Some(&sh));
+        assert!(p.answer("Master password: ", P));
+        assert!(p.expect("Imported 1 entries"));
+        assert_wiped(
+            &mut p,
+            &canaries(&[("P", P), ("C1", C1), ("N2", N2), ("C7", C7)]),
+            0,
+        );
+
+        // A wrong master password: exit 2.
+        let mut p = paused(&home, &[], None);
+        assert!(p.answer("Master password: ", W));
+        assert_wiped(&mut p, &canaries(&[("W", W), ("P", P), ("C1", C1)]), 2);
+
+        // A rollback refused after a successful unlock: exit 3.
+        common::pty::overwrite(&home.vault(), &old);
+        let mut p = paused(&home, &[], None);
+        assert!(p.answer("Master password: ", P));
+        assert!(p.answer("Type yes to continue: ", "no"));
+        assert_wiped(&mut p, &canaries(&[("P", P), ("C1", C1)]), 3);
     }
 
     /// The scanner skips a guard page inside a readable mapping, and only
